@@ -1,0 +1,2986 @@
+SET DATEFIRST 7
+SET ANSI_NULLS OFF
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED
+SET LOCK_TIMEOUT -1
+SET QUOTED_IDENTIFIER OFF
+SET NOCOUNT ON
+SET ANSI_WARNINGS OFF
+GO
+
+--======================================================================================
+-- SP PROCESAR LAYOUTS SALIDA MANUAL - HERRAM/PROCESOS | 06 06 2019 | IZEPEDA | 6000_VIC 
+--======================================================================================
+IF EXISTS(SELECT * FROM sysobjects WHERE id = object_id('dbo.vicSPProcesarLayoutSalidaManual') AND TYPE = 'P') 
+DROP PROCEDURE dbo.vicSPProcesarLayoutSalidaManual
+GO
+CREATE PROCEDURE dbo.vicSPProcesarLayoutSalidaManual
+
+    @Estacion       int,
+    @Layout         varchar(255),
+    @CtaDinD        varchar(30),
+    @DiasArchivo    varchar(25),
+    @Empresa        varchar(10),
+    @RutaArchivo    varchar(254),
+    @Usuario        varchar(15),
+    @Conexion       bit                 = 0,
+    @EnSilencio     bit                 = 0,
+    @Ok             int                 = NULL OUTPUT,
+    @OkRef          varchar(255)        = NULL OUTPUT
+
+AS BEGIN
+
+DECLARE
+    --//tabla vicCfgLayoutSalida
+    @IDLayoutSalida         int,
+    @EstatusLayoutSalida    varchar(20),
+    @FormatoLayout          varchar(25),
+    @EspacioCantidad        int,
+    @SeparadorFormato       varchar(15),
+    @TablaBD                varchar(100),
+    @GenerarArchivoAuto     bit,
+    @PuntoDecimal           bit,
+    @CeroIzq                bit,
+    @RelacionarCtaDin       bit,
+    @CuentaDinCampo         varchar(35),
+    @TipoArchivo            varchar(10),
+    --//tabla vicCfgLayoutSalidaDCfg
+    @NombreArchivo          varchar(50),
+    @SobreEscribir          bit,
+    @Frecuencia             varchar(25),
+    @ArchivoDesde           date,
+    @ArchivoHasta           date,    
+    --//tabla vicCfgLayoutSalidaDGral
+    @Renglon                float,
+    @Ubicacion              varchar(30),
+    @NombreColumna          varchar(99),
+    @TipoDato               varchar(25),
+    @FormatoColumna         varchar(25),
+    @ValorDefecto           varchar(99),
+    @Longitud               int,
+    @Campo                  varchar(99),
+    @Nombre                 varchar(99),
+    --//Cuerpo Archivo txt o csv
+    @CuerpoArchivo          varchar(max),
+    @EncabezadoArchivo      varchar(max),
+    @DetalleArchivo         varchar(max),
+    @TipoDatoA              varchar(25),
+    @FormatoColumnaA        varchar(25),
+    @ValorDefectoA          varchar(99),
+    @LongitudA              int,
+    @CampoA                 varchar(max),
+    @CampoB                 varchar(max),
+    @CtaDineroD             varchar(20),
+    --//crea archivo
+    @ManejadorObjeto        int,
+    --//Tablas:
+    @TablaEncabezado        varchar(100),
+    @TablaDetalle           varchar(100),
+    @SQL                    varchar(max),
+    --@SQLB                   varchar(max),
+    @ConsultaPre            varchar(max),
+    @ConsultaPos            varchar(max),
+    @ConsultaPreB           varchar(max),
+    @ConsultaPosB           varchar(max),
+    @Separador              varchar(10),
+    @FechaD                 date,
+    @Hoy                    date = GETDATE(),
+    @Reg                    varchar(max),
+    @Group                  varchar(max),
+    @Group2                 varchar(max),
+    @GrupoCtasDIN           varchar(max),
+	@PrefijoNombre			varchar(50),
+	@FechaArchivo			varchar(30)
+
+    SELECT @IDLayoutSalida      = ID, --// Se obtiene ID del Layout
+           @EstatusLayoutSalida = Estatus,
+           @FormatoLayout       = Formato,
+           @EspacioCantidad     = EspacioCantidad,
+           @SeparadorFormato    = Separador,
+           @GenerarArchivoAuto  = GenerarArchivoAuto,
+           @TipoArchivo         = TipoArchivo,
+           @TablaBD             = TablaBD,
+           @PuntoDecimal        = PuntoDecimal,
+           @CeroIzq             = CeroIzquierda,
+           @RelacionarCtaDin    = RelacionarCtaDinero,
+           @CuentaDinCampo      = CtaDinero,
+		   @PrefijoNombre		= PrefijoArchivo
+    FROM vicCfgLayoutSalida
+    WHERE Nombre = @Layout
+    
+IF @Conexion = 0
+ BEGIN TRANSACTION  
+  BEGIN TRY
+
+
+ IF @RelacionarCtaDin = 1 AND @CuentaDinCampo IS NOT NULL
+ BEGIN
+  DECLARE CurCtasDIN CURSOR LOCAL FOR
+  SELECT v.CtaDinero FROM vicLayoutSalidaCtaDin v
+  JOIN CtaDinero c ON v.CtaDinero = c.CtaDinero WHERE c.Empresa = @Empresa AND v.LayoutNombre = @Layout
+   OPEN CurCtasDIN 
+    FETCH NEXT FROM CurCtasDIN INTO @CtaDineroD
+    WHILE @@FETCH_STATUS = 0
+     BEGIN
+      SET @GrupoCtasDIN = isnull(@GrupoCtasDIN,'') + ''''+@CtaDineroD+'''' +', '
+      --//SELECT @GrupoCtasDIN as CadenaSalida
+     FETCH NEXT FROM CurCtasDIN INTO @CtaDineroD
+     END
+  CLOSE CurCtasDIN
+ DEALLOCATE CurCtasDIN
+END
+SELECT @GrupoCtasDIN = SUBSTRING (@GrupoCtasDIN, 1, Len(@GrupoCtasDIN) - 1 )
+
+ IF @EstatusLayoutSalida = 'Activo' AND @TipoArchivo IN ('txt','csv')
+  BEGIN
+
+ 
+--=============================================================================
+-- ****************************** ENCABEZADO **********************************
+--=============================================================================
+
+--======================
+-- TXT: SEPARADOR PIPE
+--======================
+  
+--SELECT @Empresa AS EMPRESA_GENERACION_LAYOUT_CURSOR
+
+--//*ENCABEZADO TXT
+
+DELETE FROM vicLayoutSalidaINSERTEnc
+
+       IF @TipoArchivo = 'txt'
+        BEGIN
+
+        --//Genera cadena ENCABEZADO de archivo txt
+         DECLARE CurEncabezadoTxt CURSOR LOCAL FOR
+           SELECT Campo, ValorDefecto, TipoDato, FormatoColumna, Longitud
+           FROM vicCfgLayoutSalidaDGral
+           WHERE Nombre = @Layout
+           AND Ubicacion = 'Encabezado'
+           
+           SET @EncabezadoArchivo = ''
+
+           OPEN CurEncabezadoTxt
+           FETCH NEXT FROM CurEncabezadoTxt INTO @CampoA, @ValorDefectoA, @TipoDatoA, @FormatoColumnaA, @LongitudA
+            WHILE @@FETCH_STATUS = 0
+              BEGIN
+
+               IF @SeparadorFormato = 'pipe' SET @Separador = '|'
+               IF @SeparadorFormato = 'diagonal' SET @Separador = '/'
+
+               SELECT @TablaEncabezado = @TablaBD
+
+               --IF @TablaBD = 'Gastos' SET @TablaEncabezado = 'Gasto'
+               
+               SELECT @Group = isnull(@Group,'')+@CampoA+','
+               --//SELECT @Group as GRUPO
+               SELECT @Group2 = SUBSTRING (@Group, 1, Len(@Group) - 1 )
+               --//SELECT @Group2 AS GROUP_BY_SELECT
+--===========================
+-- ANCHO FIJO:
+--===========================
+
+--// FORMATO ANCHO FIJO CON CEROS:
+
+          IF @FormatoLayout = 'Ancho Fijo' AND @CeroIzq = 1 AND (@PuntoDecimal IS NULL OR @PuntoDecimal = 0)
+           BEGIN
+            
+             IF @EspacioCantidad IS NULL SET @EspacioCantidad = 5
+
+              IF @TipoDatoA = 'Varchar'
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')
+              +' cast(isnull(RTRIM(LEFT('+@CampoA+', '+CONVERT(varchar(max), @LongitudA)+ ')) , '+'RTRIM(LEFT('+''''+CONVERT(varchar(max),@ValorDefectoA)+''''+','+ CONVERT(varchar(max), @LongitudA) + '))) as varchar) + ' +CHAR(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               --ANTERIOR: +' REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN(ISNULL('+@CampoA +',' +cast(+''''+@ValorDefectoA+'''' as varchar) +')) + ' + cast(@EspacioCantidad as varchar)+  ' )' + ' + '
+               --EJEMPLO:  + REPLICATE (' ',  5                              - LEN( cast(isnull(LEFT(         Mov,                                    5) , LEFT('CHEQUE'                    ,                                 5    )) as varchar))+ 5)
+              +' REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN( cast(isnull(RTRIM(LEFT('+@CampoA +','+CONVERT(varchar(max), @LongitudA)+')) , RTRIM(LEFT('+''''+@ValorDefectoA+''''+','+CONVERT(varchar(max), @LongitudA) +'))) as varchar)) + ' + cast(@EspacioCantidad as varchar)+  ' )' + ' + '
+
+              IF @TipoDatoA IN ('Float','Money')
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')
+               + 'CASE'+char(13)
+               + 'WHEN dbo.fnEsNumerico(' +@CampoA+ ') = 1 THEN ' + char(13)               
+               + 'cast(REPLICATE(''0'', '+cast(@LongitudA as varchar)+' - LEN('+@CampoA+')) as varchar(max)) + ' 
+               + 'cast(isnull('+@CampoA+', '+''''+@ValorDefectoA+''''+') as varchar ) ' +char(13)              
+               + 'WHEN dbo.fnEsNumerico('+'''' +@ValorDefectoA+ ''''+ ') = 1 THEN ' + char(13)
+               + 'REPLICATE (''0'', '+cast(@LongitudA as varchar)+' - LEN(' +''''+@ValorDefectoA+''''+ ')) +' + ''''+@ValorDefectoA+''''+ ' END + '
+               +' REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '               
+             
+              IF @TipoDatoA IN ('Int', 'Bit')
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')
+               +' cast(isnull(RTRIM(LEFT('+@CampoA+', '+CONVERT(varchar(max), @LongitudA)+ ')) , '+'RTRIM(LEFT('+''''+CONVERT(varchar(max),@ValorDefectoA)+''''+','+ CONVERT(varchar(max), @LongitudA) + '))) as varchar) + ' +CHAR(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN( cast(isnull(RTRIM(LEFT('+@CampoA +','+CONVERT(varchar(max), @LongitudA)+')) , RTRIM(LEFT('+''''+@ValorDefectoA+''''+','+CONVERT(varchar(max), @LongitudA) +'))) as varchar)) + ' + cast(@EspacioCantidad as varchar)+  ' )' + ' + '
+              
+              --//AMD
+              IF @FormatoColumnaA = 'Fecha AMD'               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''yyyyMMdd'')' + ' + ' + char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '', ' + cast(@LongitudA as varchar)+ ' - LEN('+ 'FORMAT(cast('+@CampoA+ ' as date), ''yyyyMMdd'')' +') + ' + cast(@EspacioCantidad as varchar)+  ' )'
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               --//+''''+@ValorDefectoA+''''
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''yyyyMMdd'''+') ' + ' + ' +char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN(ISNULL('+@CampoA +',' +cast(+''''+@ValorDefectoA+'''' as varchar) +')) + ' + cast(@EspacioCantidad as varchar)+  ' )'
+               +' END  + '
+
+               --//DMA
+              IF @FormatoColumnaA = 'Fecha DMA'               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''ddMMyyyy'')' + ' + '+ char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '', ' + cast(@LongitudA as varchar)+ ' - LEN('+ 'FORMAT(cast('+@CampoA+ ' as date), ''ddMMyyyy'')' +') + ' + cast(@EspacioCantidad as varchar)+  ' )' 
+               +' WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''ddMMyyyy'''+') ' + ' + ' +char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN(ISNULL('+@CampoA +',' +cast(+''''+@ValorDefectoA+'''' as varchar) +')) + ' + cast(@EspacioCantidad as varchar)+  ' )'
+               +' END  + '
+
+               --//MDA
+              IF @FormatoColumnaA = 'Fecha MDA'               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''MMddyyyy'')' + ' + '+ char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '', ' + cast(@LongitudA as varchar)+ ' - LEN('+ 'FORMAT(cast('+@CampoA+ ' as date), ''MMddyyyy'')' +') + ' + cast(@EspacioCantidad as varchar)+  ' )' 
+               +' WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''MMddyyyy'''+') ' + ' + ' +char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' + REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN(ISNULL('+@CampoA +',' +cast(+''''+@ValorDefectoA+'''' as varchar) +')) + ' + cast(@EspacioCantidad as varchar)+  ' )'
+               +' END  + '
+               
+               SELECT @ConsultaPos = SUBSTRING (@ConsultaPre, 1, Len(@ConsultaPre) - 1 )
+                 
+               --//SELECT @ConsultaPos as ConsultaCompletaEncabezado
+
+            END
+
+--//FORMATO ANCHO FIJO CON DECIMALES:
+
+          IF @FormatoLayout = 'Ancho Fijo' AND @PuntoDecimal = 1 AND (@CeroIzq IS NULL OR @CeroIzq = 0)
+           BEGIN
+
+              IF @TipoDatoA = 'Varchar'
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')               
+              +' cast(isnull(RTRIM(LEFT('+@CampoA+', '+CONVERT(varchar(max), @LongitudA)+ ')) , '+'RTRIM(LEFT('+''''+CONVERT(varchar(max),@ValorDefectoA)+''''+','+ CONVERT(varchar(max), @LongitudA) + '))) as varchar) + ' +CHAR(13)
+               --//RESPETA POSICIÓN LAYOUT:
+              +' REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN( cast(isnull(RTRIM(LEFT('+@CampoA +','+CONVERT(varchar(max), @LongitudA)+')) , RTRIM(LEFT('+''''+@ValorDefectoA+''''+','+CONVERT(varchar(max), @LongitudA) +'))) as varchar)) + ' + cast(@EspacioCantidad as varchar)+  ' )' + ' + '
+               
+              IF @TipoDatoA IN ('Float','Money') 
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')               
+               + 'CASE'+char(13)
+               + 'WHEN dbo.fnEsNumerico(' +@CampoA+ ') = 1 THEN ' + char(13)                
+               + 'cast(isnull('+'CONVERT(DECIMAL(18,2), '+@CampoA+') , '+''''+@ValorDefectoA+''''+') as varchar ) '+char(13)               
+               + 'WHEN dbo.fnEsNumerico('+'''' +@ValorDefectoA+ ''''+ ') = 1 THEN ' +char(13)
+               + 'CONVERT ( varchar(max) , cast (' +''''+@ValorDefectoA+''''+ ' as decimal (12,2)) ) END + ' + char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN(ISNULL('+'CONVERT(DECIMAL(18,2), '+@CampoA+') '+',' +cast(+''''+@ValorDefectoA+'''' as varchar) +')) + ' + cast(@EspacioCantidad as varchar) + ' )'  + ' + ' 
+ 
+              IF @TipoDatoA IN ('Int', 'Bit')
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')
+               +' cast(isnull(RTRIM(LEFT('+@CampoA+', '+CONVERT(varchar(max), @LongitudA)+ ')) , '+'RTRIM(LEFT('+''''+CONVERT(varchar(max),@ValorDefectoA)+''''+','+ CONVERT(varchar(max), @LongitudA) + '))) as varchar) + ' +CHAR(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN( cast(isnull(RTRIM(LEFT('+@CampoA +','+CONVERT(varchar(max), @LongitudA)+')) , RTRIM(LEFT('+''''+@ValorDefectoA+''''+','+CONVERT(varchar(max), @LongitudA) +'))) as varchar)) + ' + cast(@EspacioCantidad as varchar)+  ' )' + ' + '
+
+               --//AMD
+              IF @FormatoColumnaA = 'Fecha AMD'               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''yyyyMMdd'')' + ' + ' + char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '', ' + cast(@LongitudA as varchar)+ ' - LEN('+ 'FORMAT(cast('+@CampoA+ ' as date), ''yyyyMMdd'')' +') + ' + cast(@EspacioCantidad as varchar)+  ' )'
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               --//+''''+@ValorDefectoA+''''
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''yyyyMMdd'''+') ' + ' + ' +char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN(ISNULL('+@CampoA +',' +cast(+''''+@ValorDefectoA+'''' as varchar) +')) + ' + cast(@EspacioCantidad as varchar)+  ' )'
+               +' END  + '
+
+               --//DMA
+              IF @FormatoColumnaA = 'Fecha DMA'               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''ddMMyyyy'')' + ' + '+ char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '', ' + cast(@LongitudA as varchar)+ ' - LEN('+ 'FORMAT(cast('+@CampoA+ ' as date), ''ddMMyyyy'')' +') + ' + cast(@EspacioCantidad as varchar)+  ' )' 
+               +' WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''ddMMyyyy'''+') ' + ' + ' +char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN(ISNULL('+@CampoA +',' +cast(+''''+@ValorDefectoA+'''' as varchar) +')) + ' + cast(@EspacioCantidad as varchar)+  ' )'
+               +' END  + '
+
+               --//MDA
+              IF @FormatoColumnaA = 'Fecha MDA'               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''MMddyyyy'')' + ' + '+ char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '', ' + cast(@LongitudA as varchar)+ ' - LEN('+ 'FORMAT(cast('+@CampoA+ ' as date), ''MMddyyyy'')' +') + ' + cast(@EspacioCantidad as varchar)+  ' )' 
+               +' WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''MMddyyyy'''+') ' + ' + ' +char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' + REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN(ISNULL('+@CampoA +',' +cast(+''''+@ValorDefectoA+'''' as varchar) +')) + ' + cast(@EspacioCantidad as varchar)+  ' )'
+               +' END  + '
+               
+               SELECT @ConsultaPos = SUBSTRING (@ConsultaPre, 1, Len(@ConsultaPre) - 1 )               
+               --//SELECT @ConsultaPos as ConsultaCompletaEncabezadoDECIMAL
+
+            END
+
+
+--// FORMATO ANCHO FIJO CON CEROS Y CON DECIMALES
+
+          IF @FormatoLayout = 'Ancho Fijo' AND @CeroIzq = 1 AND @PuntoDecimal = 1
+           BEGIN
+               
+              IF @EspacioCantidad IS NULL SET @EspacioCantidad = 5
+
+              IF @TipoDatoA = 'Varchar'
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')               
+              +' cast(isnull(RTRIM(LEFT('+@CampoA+', '+CONVERT(varchar(max), @LongitudA)+ ')) , '+'RTRIM(LEFT('+''''+CONVERT(varchar(max),@ValorDefectoA)+''''+','+ CONVERT(varchar(max), @LongitudA) + '))) as varchar) + ' +CHAR(13)
+               --//RESPETA POSICIÓN LAYOUT:
+              +' REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN( cast(isnull(RTRIM(LEFT('+@CampoA +','+CONVERT(varchar(max), @LongitudA)+')) , RTRIM(LEFT('+''''+@ValorDefectoA+''''+','+CONVERT(varchar(max), @LongitudA) +'))) as varchar)) + ' + cast(@EspacioCantidad as varchar)+  ' )' + ' + '
+               
+              IF @TipoDatoA IN ('Float','Money')  
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')               
+               + 'CASE'+char(13)
+               + 'WHEN dbo.fnEsNumerico(' +@CampoA+ ') = 1 THEN ' + char(13)
+               --//cast(REPLICATE('0',                               10 - LEN(CONVERT(Decimal(18,2), Ejercicio ))) as varchar(max)) + cast(convert(decimal(18,2), Ejercicio) as varchar)
+               + 'cast(REPLICATE(''0'', '+cast(@LongitudA as varchar)+' - LEN(convert(decimal(18,2),'+@CampoA+'))) as varchar(max)) + cast(convert(decimal(18,2), '+@CampoA+') as varchar)' + char(13)
+               
+               + 'WHEN dbo.fnEsNumerico('+'''' +@ValorDefectoA+ ''''+ ') = 1 THEN ' +char(13)
+              --//REPLICATE ('0'  ,                              10 - LEN( CONVERT(Decimal(18,2),                         '2019'))) + CONVERT ( varchar(max) , cast ('2019' as decimal (18,2)) )
+               + 'REPLICATE (''0'', '+cast(@LongitudA as varchar)+' - LEN( CONVERT(Decimal(18,2), ' +''''+@ValorDefectoA+''''+ '))) + CONVERT ( varchar(max) , cast (' +''''+@ValorDefectoA+''''+ ' as decimal (12,2)) ) END +'
+               --//RESPETA POSICIÓN LAYOUT:       
+               +' REPLICATE ('' '',' +cast(@LongitudA as varchar)+' - LEN(ISNULL('+'cast(REPLICATE(''0'', '+cast(@LongitudA as varchar)+' - LEN(CONVERT(Decimal(18,2),'+ @CampoA+'))) as varchar(max)) + cast(convert(decimal(18,2), '+@CampoA+') as varchar),'
+               +' REPLICATE (''0'',' +cast(@LongitudA as varchar)+' - LEN( CONVERT(Decimal(18,2), '+''''+@ValorDefectoA+''''+'))) + CONVERT ( varchar(max) , cast ('+''''+@ValorDefectoA+''''+' as decimal (18,2)) ))) + ' +cast(@EspacioCantidad as varchar) +  ' ) + ' 
+
+              IF @TipoDatoA IN ('Int', 'Bit')
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')
+               +' cast(isnull(RTRIM(LEFT('+@CampoA+', '+CONVERT(varchar(max), @LongitudA)+ ')) , ''RTRIM(LEFT('+''''+CONVERT(varchar(max),@ValorDefectoA)+''''+','+ CONVERT(varchar(max), @LongitudA) + '))) as varchar) + ' +CHAR(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN( cast(isnull(RTRIM(LEFT('+@CampoA +','+CONVERT(varchar(max), @LongitudA)+')) , RTRIM(LEFT('+''''+@ValorDefectoA+''''+','+CONVERT(varchar(max), @LongitudA) +'))) as varchar)) + ' + cast(@EspacioCantidad as varchar)+  ' )' + ' + '
+
+               --//AMD
+              IF @FormatoColumnaA = 'Fecha AMD'               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''yyyyMMdd'')' + ' + ' + char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '', ' + cast(@LongitudA as varchar)+ ' - LEN('+ 'FORMAT(cast('+@CampoA+ ' as date), ''yyyyMMdd'')' +') + ' + cast(@EspacioCantidad as varchar)+  ' )'
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               --//+''''+@ValorDefectoA+''''
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''yyyyMMdd'''+') ' + ' + ' +char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN(ISNULL('+@CampoA +',' +cast(+''''+@ValorDefectoA+'''' as varchar) +')) + ' + cast(@EspacioCantidad as varchar)+  ' )'
+               +' END + ' 
+
+               --//DMA
+              IF @FormatoColumnaA = 'Fecha DMA'               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''ddMMyyyy'')' + ' + '+ char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '', ' + cast(@LongitudA as varchar)+ ' - LEN('+ 'FORMAT(cast('+@CampoA+ ' as date), ''ddMMyyyy'')' +') + ' + cast(@EspacioCantidad as varchar)+  ' )' 
+               +' WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''ddMMyyyy'''+') ' + ' + ' +char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN(ISNULL('+@CampoA +',' +cast(+''''+@ValorDefectoA+'''' as varchar) +')) + ' + cast(@EspacioCantidad as varchar)+  ' )'
+               +' END  + '
+
+              --//MDA
+              IF @FormatoColumnaA = 'Fecha MDA'               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''MMddyyyy'')' + ' + '+ char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '', ' + cast(@LongitudA as varchar)+ ' - LEN('+ 'FORMAT(cast('+@CampoA+ ' as date), ''MMddyyyy'')' +') + ' + cast(@EspacioCantidad as varchar)+  ' )' 
+               +' WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''MMddyyyy'''+') ' + ' + ' +char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' + REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN(ISNULL('+@CampoA +',' +cast(+''''+@ValorDefectoA+'''' as varchar) +')) + ' + cast(@EspacioCantidad as varchar)+  ' )'
+               +' END  + '
+               
+               SELECT @ConsultaPos = SUBSTRING (@ConsultaPre, 1, Len(@ConsultaPre) - 1 )
+               
+               --//SELECT @ConsultaPos as ConsultaCompletaEncabezado
+
+            END
+ 
+ --//FORMATO ANCHO FIJO SIN CEROS SIN DECIMALES
+
+            IF @FormatoLayout = 'Ancho Fijo' AND (@CeroIzq IS NULL OR @CeroIzq = 0) AND (@PuntoDecimal IS NULL OR @PuntoDecimal = 0)
+             BEGIN
+               
+               IF @EspacioCantidad IS NULL SET @EspacioCantidad = 5
+               
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')
+               
+               IF @FormatoColumnaA IN ('Fecha DMA', 'Fecha AMD', 'Fecha MDA')
+               BEGIN
+               DECLARE @FormatoF varchar(10)
+
+               IF @FormatoColumnaA = 'Fecha DMA' SET @FormatoF = 'ddMMyyyy'
+               IF @FormatoColumnaA = 'Fecha AMD' SET @FormatoF = 'yyyyMMdd'
+               IF @FormatoColumnaA = 'Fecha MDA' SET @FormatoF = 'MMddyyyy'
+
+               SELECT @ConsultaPre = @ConsultaPre
+               + ' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+''''+@FormatoF+''''+') + ' + char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '', ' + cast(@LongitudA as varchar)+ ' - LEN('+ 'FORMAT(cast('+@CampoA+ ' as date), '+''''+@FormatoF+''''+ ')' +') + ' + cast(@EspacioCantidad as varchar)+  ' )' + ' + '
+
+               END
+
+               ELSE 
+               SELECT @ConsultaPre = @ConsultaPre
+               +' cast(isnull(RTRIM(LEFT('+@CampoA+', '+CONVERT(varchar(max), @LongitudA)+ ')) , '+'RTRIM(LEFT('+''''+CONVERT(varchar(max),@ValorDefectoA)+''''+','+ CONVERT(varchar(max), @LongitudA) + '))) as varchar) + ' +CHAR(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN( cast(isnull(RTRIM(LEFT('+@CampoA +','+CONVERT(varchar(max), @LongitudA)+')) , RTRIM(LEFT('+''''+@ValorDefectoA+''''+','+CONVERT(varchar(max), @LongitudA) +'))) as varchar)) + ' + cast(@EspacioCantidad as varchar)+  ' )' + ' + '
+
+               SELECT @ConsultaPos = SUBSTRING (@ConsultaPre, 1, Len(@ConsultaPre) - 1 )
+               --//SELECT @ConsultaPos as ConsultaCompletaEncabezado
+
+             END
+
+--=====================
+-- TERMINA ANCHO FIJO
+--=====================  
+
+--=====================
+-- SEPARADOR:
+--=====================
+
+--// FORMATO SEPARADOR CON CEROS:
+
+          IF @FormatoLayout = 'Separador' AND @CeroIzq = 1 AND (@PuntoDecimal IS NULL OR @PuntoDecimal = 0)
+           BEGIN
+               
+              IF @TipoDatoA = 'Varchar'
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')
+               +'cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) +'
+               + ''''+@Separador+''''  + ' + '
+               
+              IF @TipoDatoA IN ('Float','Money')
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')
+               + 'CASE'+char(13)
+               + 'WHEN dbo.fnEsNumerico(' +@CampoA+ ') = 1 THEN ' + char(13)               
+               + 'cast(REPLICATE(''0'', '+cast(@LongitudA as varchar)+' - LEN('+@CampoA+')) as varchar(max)) + ' 
+               + 'cast(isnull('+@CampoA+', '+''''+@ValorDefectoA+''''+') as varchar ) ' +char(13)               
+               + 'WHEN dbo.fnEsNumerico('+'''' +@ValorDefectoA+ ''''+ ') = 1 THEN ' +char(13) --//
+               + 'REPLICATE (''0'', '+cast(@LongitudA as varchar)+' - LEN(' +''''+@ValorDefectoA+''''+ ')) +' + ''''+@ValorDefectoA+''''+ ' END + '
+               + ''''+@Separador+''''  + ' + '
+
+              IF @TipoDatoA IN ('Int','Bit')
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')
+               +'cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) + '
+               + ''''+@Separador+''''  + ' + '
+
+               --//
+               IF @FormatoColumnaA = 'Fecha AMD'
+               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''yyyyMMdd'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               --//+''''+@ValorDefectoA+''''
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''yyyyMMdd'''+') '+char(13)
+               +' END + '
+               + ''''+@Separador+''''  + ' + '
+               
+               --//
+               IF @FormatoColumnaA = 'Fecha DMA'
+               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''ddMMyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               --//+''''+@ValorDefectoA+''''
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''ddMMyyyy'''+') '+char(13)
+               +' END + '
+               + ''''+@Separador+''''  + ' + '
+
+               --//
+               IF @FormatoColumnaA = 'Fecha MDA'
+               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''MMddyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               --//+''''+@ValorDefectoA+''''
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''MMddyyyy'''+') '+char(13)
+               +' END + '
+               + ''''+@Separador+''''  + ' + '
+               
+               SELECT @ConsultaPos = SUBSTRING (@ConsultaPre, 1, Len(@ConsultaPre) - 1 )
+               --//SELECT @ConsultaPos as ConsultaCompletaEncabezado
+
+            END
+
+--//FORMATO SEPARADOR CON DECIMALES ENCABEZADO:
+
+          IF @FormatoLayout = 'Separador' AND @PuntoDecimal = 1 AND (@CeroIzq IS NULL OR @CeroIzq = 0)
+           BEGIN
+           
+              IF @TipoDatoA = 'Varchar'
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')
+               +'cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) +'
+               + ''''+@Separador+''''  + ' + '
+               
+              IF @TipoDatoA IN ('Float','Money')
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')               
+               + 'CASE'+char(13)
+               + 'WHEN dbo.fnEsNumerico(' +@CampoA+ ') = 1 THEN ' + char(13)               
+               --+ 'cast(REPLICATE(''0'', '+cast(@LongitudA as varchar)+' - LEN('+@CampoA+')) as varchar(max)) + ' 
+               + 'cast(isnull('+'CONVERT(DECIMAL(18,2), '+@CampoA+') , '+''''+@ValorDefectoA+''''+') as varchar ) ' +char(13)                  
+               + 'WHEN dbo.fnEsNumerico('+'''' +@ValorDefectoA+ ''''+ ') = 1 THEN ' +char(13)
+               + 'CONVERT ( varchar(max) , cast (' +''''+@ValorDefectoA+''''+ ' as decimal (12,2)) ) END + ' + char(13)
+               + ''''+@Separador+''''  + ' + '
+              
+              IF @TipoDatoA IN ('Int','Bit')
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')
+               +'cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) + '
+               + ''''+@Separador+''''  + ' + '
+                          
+               --//
+               IF @FormatoColumnaA = 'Fecha AMD'
+               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''yyyyMMdd'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               --//+''''+@ValorDefectoA+''''
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''yyyyMMdd'''+') '+char(13)
+               +' END + '
+               + ''''+@Separador+''''  + ' + '
+
+               --//
+               IF @FormatoColumnaA = 'Fecha DMA'
+               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''ddMMyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               --//+''''+@ValorDefectoA+''''
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''ddMMyyyy'''+') '+char(13)
+               +' END + '
+               + ''''+@Separador+''''  + ' + '
+
+               IF @FormatoColumnaA = 'Fecha MDA'
+               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''MMddyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               --//+''''+@ValorDefectoA+''''
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''MMddyyyy'''+') '+char(13)
+               +' END + '
+               + ''''+@Separador+''''  + ' + '
+               
+               SELECT @ConsultaPos = SUBSTRING (@ConsultaPre, 1, Len(@ConsultaPre) - 1 )
+               --//SELECT @ConsultaPos as ConsultaCompletaEncabezadoDECIMAL
+
+            END
+
+
+--// FORMATO SEPARADOR CON CEROS Y CON DECIMALES
+
+          IF @FormatoLayout = 'Separador' AND @CeroIzq = 1 AND @PuntoDecimal = 1
+           BEGIN
+             IF @TipoDatoA = 'Varchar'
+              SELECT @ConsultaPre = isnull(@ConsultaPre,'')
+              +'cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) +'
+              + ''''+@Separador+''''  + ' + '
+
+             IF @TipoDatoA IN ('Float','Money')
+              SELECT @ConsultaPre = isnull(@ConsultaPre,'')
+               + 'CASE'+char(13)
+               + 'WHEN dbo.fnEsNumerico(' +@CampoA+ ') = 1 THEN ' + char(13)
+               + ' + cast(REPLICATE(''0'', '+cast(@LongitudA as varchar)+' - LEN('+@CampoA+')) as varchar(max)) + cast(convert(decimal(18,2), '+@CampoA+') as varchar)'
+               + char(13)
+               + 'WHEN dbo.fnEsNumerico('+'''' +@ValorDefectoA+ ''''+ ') = 1 THEN ' +char(13)
+               + ' + REPLICATE (''0'', '+cast(@LongitudA as varchar)+' - LEN(' +''''+@ValorDefectoA+''''+ ')) + CONVERT ( varchar(max) , cast (' +''''+@ValorDefectoA+''''+ ' as decimal (12,2)) ) END + '
+               + ''''+@Separador+''''  + ' + '
+             
+             IF @TipoDatoA IN ('Int','Bit')
+              SELECT @ConsultaPre = isnull(@ConsultaPre,'')
+              +'cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) + '
+              + ''''+@Separador+''''  + ' + '
+
+              --//
+              IF @FormatoColumnaA = 'Fecha AMD'
+               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''yyyyMMdd'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''yyyyMMdd'''+') '+char(13)
+               +' END   +'
+               + ''''+@Separador+''''  + ' + '
+               
+              --//
+              IF @FormatoColumnaA = 'Fecha DMA'
+               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''ddMMyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''ddMMyyyy'''+') '+char(13)
+               +' END  + '
+               + ''''+@Separador+''''  + ' + '
+
+              --//
+              IF @FormatoColumnaA = 'Fecha MDA'
+               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''MMddyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''MMddyyyy'''+') '+char(13)
+               +' END  + '
+               + ''''+@Separador+''''  + ' + '
+
+               SELECT @ConsultaPos = SUBSTRING (@ConsultaPre, 1, Len(@ConsultaPre) - 1 )
+               
+               --//SELECT @ConsultaPos as ConsultaCompletaEncabezado
+
+            END
+
+ 
+ --//FORMATO SEPARADOR SIN CEROS SIN DECIMALES
+            IF @FormatoLayout = 'Separador' AND (@CeroIzq IS NULL OR @CeroIzq = 0) AND (@PuntoDecimal IS NULL OR @PuntoDecimal = 0)
+             BEGIN
+               
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')
+               
+               IF @FormatoColumnaA IN ('Fecha DMA', 'Fecha AMD', 'Fecha MDA')
+                BEGIN
+                DECLARE @FormatoF1 varchar(10)
+
+                IF @FormatoColumnaA = 'Fecha DMA' SET @FormatoF1 = 'ddMMyyyy'
+                IF @FormatoColumnaA = 'Fecha AMD' SET @FormatoF1 = 'yyyyMMdd'
+                IF @FormatoColumnaA = 'Fecha MDA' SET @FormatoF1 = 'MMddyyyy'
+
+                SELECT @ConsultaPre = @ConsultaPre
+                + ' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+''''+@FormatoF1+''''+') + ' + char(13)
+                + ''''+@Separador+''''  + ' + '
+
+               END
+
+               ELSE 
+               SELECT @ConsultaPre = @ConsultaPre
+               + ' cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) + ' +char(13)
+               + ''''+@Separador+''''  + ' + '
+
+               SELECT @ConsultaPos = SUBSTRING (@ConsultaPre, 1, Len(@ConsultaPre) - 1 )
+               --//SELECT @ConsultaPos as ConsultaCompletaEncabezado
+
+             END
+
+--===========================
+-- TERMINA FORMATO SEPARADOR
+--===========================
+  
+    --//Consulta    
+    --//Llena tabla layout
+    
+               IF @DiasArchivo = 'Todo' AND @CtaDinD IS NOT NULL
+                BEGIN
+                  
+                 SET @SQL = ' DELETE FROM vicLayoutSalidaINSERTEnc '+char(13)
+                           +' INSERT INTO vicLayoutSalidaINSERTEnc (ID, Reg) '+char(13)
+                           +' SELECT top 1 max (ID), + '+ @ConsultaPos+' FROM '+@TablaEncabezado +char(13)
+                           +' WHERE isnull(Empresa,'''') = '+ 'isnull('+''''+@Empresa+''''+', isnull(Empresa, ''''))' +char(13)
+                           +' AND '+ @CuentaDinCampo + ' = '+''''+ @CtaDinD + ''''+char(13)
+                           +' GROUP BY '+ @Group2
+                        
+                 EXEC (@SQL)
+
+                END
+
+                IF @DiasArchivo = 'Todo' AND (@CtaDinD IS NULL OR @CtaDinD IN ('',' ')) 
+                 BEGIN
+                 
+                 SET @SQL = ' DELETE FROM vicLayoutSalidaINSERTEnc '+char(13)
+                           +' INSERT INTO vicLayoutSalidaINSERTEnc (ID, Reg) '+char(13)
+                           +' SELECT top 1 max (ID), + '+ @ConsultaPos+' FROM '+@TablaEncabezado +char(13)
+                           +' WHERE isnull(Empresa,'''') = '+ 'isnull('+''''+@Empresa+''''+', isnull(Empresa, ''''))' +char(13)                           
+                           +' GROUP BY '+ @Group2
+                        
+                 EXEC (@SQL)
+
+                 END
+                
+               IF @DiasArchivo = 'Del dia' AND @CtaDinD IS NOT NULL
+                BEGIN
+                 SET @SQL = ' DELETE FROM vicLayoutSalidaINSERTEnc '+char(13)
+                           +' INSERT INTO vicLayoutSalidaINSERTEnc (ID, Reg) '+char(13)
+                           +' SELECT top 1 max (ID), + '+@ConsultaPos+' FROM '+@TablaEncabezado +char(13)
+                           +' WHERE FechaEmision = '+''''+cast(cast(getdate() as date) as varchar)+'''' +char(13)
+                           +' AND isnull(Empresa,'''') = '+ 'isnull('+''''+@Empresa+''''+', isnull(Empresa, ''''))' +char(13)
+                           +' AND '+ @CuentaDinCampo + ' = '+''''+ @CtaDinD + ''''+char(13)
+                           +' GROUP BY '+@Group2
+
+                 EXEC (@SQL)
+
+                END
+                
+               IF @DiasArchivo = 'Del dia' AND (@CtaDinD IS NULL OR @CtaDinD IN ('',' '))
+                BEGIN
+                 SET @SQL = ' DELETE FROM vicLayoutSalidaINSERTEnc '+char(13)
+                           +' INSERT INTO vicLayoutSalidaINSERTEnc (ID, Reg) '+char(13)
+                           +' SELECT top 1 max (ID), + '+@ConsultaPos+' FROM '+@TablaEncabezado +char(13)
+                           +' WHERE FechaEmision = '+''''+cast(cast(getdate() as date) as varchar)+'''' +char(13)
+                           +' AND isnull(Empresa,'''') = '+ 'isnull('+''''+@Empresa+''''+', isnull(Empresa, ''''))' +char(13)
+                           +' GROUP BY '+@Group2
+
+                 EXEC (@SQL)
+
+                END
+
+               IF @DiasArchivo = 'Del dia anterior' AND @CtaDinD IS NOT NULL
+                BEGIN
+                 SET @SQL = ' DELETE FROM vicLayoutSalidaINSERTEnc '+char(13)
+                           +' INSERT INTO vicLayoutSalidaINSERTEnc (ID, Reg) ' +char(13)
+                           +' SELECT top 1 max (ID), + '+@ConsultaPos+' FROM '+@TablaEncabezado +char(13)
+                           +' WHERE FechaEmision = '+''''+cast(cast(dateadd(day,-1,getdate()) as date) as varchar)+'''' +char(13)
+                           +' AND isnull(Empresa,'''') = '+ 'isnull('+''''+@Empresa+''''+', isnull(Empresa, ''''))' +char(13)
+                           +' AND '+ @CuentaDinCampo + ' = '+''''+ @CtaDinD + ''''+char(13)
+                           +' GROUP BY '+@Group2
+
+                 EXEC (@SQL)
+                END
+
+               
+               IF @DiasArchivo = 'Del dia anterior' AND (@CtaDinD IS NULL OR @CtaDinD IN ('',' '))
+                BEGIN
+                 SET @SQL = ' DELETE FROM vicLayoutSalidaINSERTEnc '+char(13)
+                           +' INSERT INTO vicLayoutSalidaINSERTEnc (ID, Reg) ' +char(13)
+                           +' SELECT top 1 max (ID), + '+@ConsultaPos+' FROM '+@TablaEncabezado +char(13)
+                           +' WHERE FechaEmision = '+''''+cast(cast(dateadd(day,-1,getdate()) as date) as varchar)+'''' +char(13)
+                           +' AND isnull(Empresa,'''') = '+ 'isnull('+''''+@Empresa+''''+', isnull(Empresa, ''''))' +char(13)
+                           +' GROUP BY '+@Group2
+
+                 EXEC (@SQL)
+
+                END
+
+                IF @DiasArchivo = 'De la semana' AND @CtaDinD IS NOT NULL
+                 BEGIN
+
+                  --//SELECT @Hoy as Hoy
+                  --//select DATEPART(WEEKDAY, @Hoy) as diadeHoy
+                  
+                  IF DATEPART(WEEKDAY, @Hoy) = 1 SELECT @FechaD = getdate()
+                  IF DATEPART(WEEKDAY, @Hoy) = 2 SELECT @FechaD = DATEADD(DAY,-1,getdate())
+                  IF DATEPART(WEEKDAY, @Hoy) = 3 SELECT @FechaD = DATEADD(DAY,-2,getdate()) 
+                  IF DATEPART(WEEKDAY, @Hoy) = 4 SELECT @FechaD = DATEADD(DAY,-3,getdate())
+                  IF DATEPART(WEEKDAY, @Hoy) = 5 SELECT @FechaD = DATEADD(DAY,-4,getdate())
+                  IF DATEPART(WEEKDAY, @Hoy) = 6 SELECT @FechaD = DATEADD(DAY,-5,getdate())
+                  IF DATEPART(WEEKDAY, @Hoy) = 7 SELECT @FechaD = DATEADD(DAY,-6,getdate())
+
+                  --//SELECT @FechaD as Desde
+                  
+                  SET @SQL = ' DELETE FROM vicLayoutSalidaINSERTEnc '+char(13)
+                            +' INSERT INTO vicLayoutSalidaINSERTEnc (ID, Reg) ' +char(13)
+                            +' SELECT top 1 max (ID), + '+@ConsultaPos+' FROM '+@TablaEncabezado +char(13)
+                            +' WHERE FechaEmision BETWEEN '+''''+cast(cast(@FechaD as date) as varchar)+''''+' AND '+
+                            ''''+cast(cast(GETDATE() as date) as varchar)+'''' + char(13)                            
+                            +' AND isnull(Empresa,'''') = '+ 'isnull('+''''+@Empresa+''''+', isnull(Empresa, ''''))' +char(13)
+                            +' AND '+ @CuentaDinCampo + ' = '+''''+ @CtaDinD + ''''+char(13)
+                            +' GROUP BY '+@Group2
+
+                  EXEC (@SQL)
+
+                 END
+
+                IF @DiasArchivo = 'De la semana' AND (@CtaDinD IS NULL OR @CtaDinD IN ('',' '))
+                 BEGIN
+                  --//SELECT @Hoy as Hoy
+                  --//select DATEPART(WEEKDAY, @Hoy) as diadeHoy
+                  
+                  IF DATEPART(WEEKDAY, @Hoy) = 1 SELECT @FechaD = getdate()
+                  IF DATEPART(WEEKDAY, @Hoy) = 2 SELECT @FechaD = DATEADD(DAY,-1,getdate())
+                  IF DATEPART(WEEKDAY, @Hoy) = 3 SELECT @FechaD = DATEADD(DAY,-2,getdate()) 
+                  IF DATEPART(WEEKDAY, @Hoy) = 4 SELECT @FechaD = DATEADD(DAY,-3,getdate())
+                  IF DATEPART(WEEKDAY, @Hoy) = 5 SELECT @FechaD = DATEADD(DAY,-4,getdate())
+                  IF DATEPART(WEEKDAY, @Hoy) = 6 SELECT @FechaD = DATEADD(DAY,-5,getdate())
+                  IF DATEPART(WEEKDAY, @Hoy) = 7 SELECT @FechaD = DATEADD(DAY,-6,getdate())
+
+                  --//SELECT @FechaD as Desde
+                  
+                  SET @SQL = ' DELETE FROM vicLayoutSalidaINSERTEnc '+char(13)
+                            +' INSERT INTO vicLayoutSalidaINSERTEnc (ID, Reg) ' +char(13)
+                            +' SELECT top 1 max (ID), + '+@ConsultaPos+' FROM '+@TablaEncabezado +char(13)
+                            +' WHERE FechaEmision BETWEEN '+''''+cast(cast(@FechaD as date) as varchar)+''''+' AND '+
+                            ''''+cast(cast(GETDATE() as date) as varchar)+'''' + char(13)                            
+                            +' AND isnull(Empresa,'''') = '+ 'isnull('+''''+@Empresa+''''+', isnull(Empresa, ''''))' +char(13)
+                            +' GROUP BY '+@Group2
+
+                  EXEC (@SQL)
+
+                 END
+
+               FETCH NEXT FROM CurEncabezadoTxt INTO @CampoA, @ValorDefectoA, @TipoDatoA, @FormatoColumnaA, @LongitudA
+
+             END
+            --//SELECT @EncabezadoArchivo as Encabezadotxt
+           CLOSE CurEncabezadoTxt
+          DEALLOCATE CurEncabezadoTxt --// Termina cursor que Genera cadena encabezado de archivo txt
+
+        END --// BEGIN de IF @TipoArchivo = 'txt'
+
+--=============
+-- TERMINA TXT
+--=============
+--====================
+-- CSV: TODOS FORMATOS
+--====================
+
+--//*ENCABEZADO CSV
+       IF @TipoArchivo = 'csv'
+        BEGIN
+        --//Genera cadena ENCABEZADO de archivo csv
+         DECLARE CurEncabezadoCsv CURSOR LOCAL FOR
+           SELECT Campo, ValorDefecto, TipoDato, FormatoColumna, Longitud
+           FROM vicCfgLayoutSalidaDGral
+           WHERE Nombre = @Layout
+           AND Ubicacion = 'Encabezado'
+           
+           SET @EncabezadoArchivo = ''
+
+           OPEN CurEncabezadoCsv
+           FETCH NEXT FROM CurEncabezadoCsv INTO @CampoA, @ValorDefectoA, @TipoDatoA, @FormatoColumnaA, @LongitudA
+            WHILE @@FETCH_STATUS = 0
+              BEGIN
+
+               IF @SeparadorFormato = 'pipe' SET @Separador = '|'
+               IF @SeparadorFormato = 'diagonal' SET @Separador = '/'               
+
+               SELECT @TablaEncabezado = @TablaBD
+
+               --IF @TablaBD = 'Gastos' SET @TablaEncabezado = 'Gasto'
+
+               SELECT @Group = isnull(@Group,'')+@CampoA+','
+               SELECT @Group2 = SUBSTRING (@Group, 1, Len(@Group) - 1 )
+
+--=================
+-- ANCHO FIJO CSV
+--=================
+
+--// FORMATO ANCHO FIJO CON CEROS:
+
+          IF @FormatoLayout = 'Ancho Fijo' AND @CeroIzq = 1 AND (@PuntoDecimal IS NULL OR @PuntoDecimal = 0)
+           BEGIN
+               
+              IF @EspacioCantidad IS NULL SET @EspacioCantidad = 5
+              
+              IF @TipoDatoA = 'Varchar'
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')
+               +' cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) +'
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+              
+              IF @TipoDatoA IN ('Float','Money')
+              SELECT @ConsultaPre = isnull(@ConsultaPre,'')               
+               + 'CASE'+char(13)
+               + 'WHEN dbo.fnEsNumerico(' +@CampoA+ ') = 1 THEN ' + char(13)               
+               + 'cast(REPLICATE(''0'', '+cast(@LongitudA as varchar)+' - LEN('+@CampoA+')) as varchar(max)) + ' 
+               + 'cast(isnull('+@CampoA+', '+''''+@ValorDefectoA+''''+') as varchar ) ' +char(13)               
+               + 'WHEN dbo.fnEsNumerico('+'''' +@ValorDefectoA+ ''''+ ') = 1 THEN ' +char(13) --//
+               +' REPLICATE (''0'', '+cast(@LongitudA as varchar)+' - LEN(' +''''+@ValorDefectoA+''''+ ')) +' + ''''+@ValorDefectoA+''''+ ' END + '
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+
+              IF @TipoDatoA IN ('Int','Bit')
+              SELECT @ConsultaPre = isnull(@ConsultaPre,'')
+              +'cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) + '
+              + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+
+               --//
+               IF @FormatoColumnaA = 'Fecha AMD'
+               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''yyyyMMdd'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               --//+''''+@ValorDefectoA+''''
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''yyyyMMdd'''+') '+char(13)
+               +' END + '
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+
+               --//
+               IF @FormatoColumnaA = 'Fecha DMA'
+               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''ddMMyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               --//+''''+@ValorDefectoA+''''
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''ddMMyyyy'''+') '+char(13)
+               +' END + '
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+
+               --//
+               IF @FormatoColumnaA = 'Fecha MDA'
+               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''MMddyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               --//+''''+@ValorDefectoA+''''
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''MMddyyyy'''+') '+char(13)
+               +' END + '
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+
+               
+               SELECT @ConsultaPos = SUBSTRING (@ConsultaPre, 1, Len(@ConsultaPre) - 1 )
+               --//SELECT @ConsultaPos as ConsultaCompletaEncabezado
+
+            END
+
+--//FORMATO ANCHO FIJO CON DECIMALES:
+
+          IF @FormatoLayout = 'Ancho Fijo' AND @PuntoDecimal = 1 AND (@CeroIzq IS NULL OR @CeroIzq = 0)
+           BEGIN
+               
+              IF @EspacioCantidad IS NULL SET @EspacioCantidad = 5
+              IF @TipoDatoA = 'Varchar'
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')
+               +' cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) +'
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+              
+              IF @TipoDatoA IN ('Float','Money')
+              SELECT @ConsultaPre = isnull(@ConsultaPre,'')
+               + 'CASE'+char(13)
+               + 'WHEN dbo.fnEsNumerico(' +@CampoA+ ') = 1 THEN ' + char(13)               
+               --+ 'cast(REPLICATE(''0'', '+cast(@LongitudA as varchar)+' - LEN('+@CampoA+')) as varchar(max)) + ' 
+               + 'cast(isnull('+'CONVERT(DECIMAL(18,2), '+@CampoA+') , '+''''+@ValorDefectoA+''''+') as varchar ) ' +char(13)               
+               + 'WHEN dbo.fnEsNumerico('+'''' +@ValorDefectoA+ ''''+ ') = 1 THEN ' +char(13)
+               + 'CONVERT ( varchar(max) , cast (' +''''+@ValorDefectoA+''''+ ' as decimal (12,2)) ) END + ' + char(13)
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+              
+              IF @TipoDatoA IN ('Int','Bit')
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')
+               +'cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) + '
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+                          
+               --//
+               IF @FormatoColumnaA = 'Fecha AMD'
+               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''yyyyMMdd'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''yyyyMMdd'''+') '+char(13)
+               +' END + '
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+
+               --//
+               IF @FormatoColumnaA = 'Fecha DMA'
+               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''ddMMyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''ddMMyyyy'''+') '+char(13)
+               +' END + '
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+
+               --//
+               IF @FormatoColumnaA = 'Fecha MDA'
+               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''MMddyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''MMddyyyy'''+') '+char(13)
+               +' END + '
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+
+               
+               SELECT @ConsultaPos = SUBSTRING (@ConsultaPre, 1, Len(@ConsultaPre) - 1 )
+               --//SELECT @ConsultaPos as ConsultaCompletaEncabezadoDECIMAL
+
+            END
+
+--// FORMATO ANCHO FIJO CON CEROS Y CON DECIMALES
+
+          IF @FormatoLayout = 'Ancho Fijo' AND @CeroIzq = 1 AND @PuntoDecimal = 1
+           BEGIN
+               
+              IF @EspacioCantidad IS NULL SET @EspacioCantidad = 5
+              
+              IF @TipoDatoA = 'Varchar'
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')
+               +' cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) +'
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+              
+              IF @TipoDatoA IN ('Float','Money')
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')               
+               + 'CASE'+char(13)
+               + 'WHEN dbo.fnEsNumerico(' +@CampoA+ ') = 1 THEN ' + char(13)
+               + 'cast(REPLICATE(''0'', '+cast(@LongitudA as varchar)+' - LEN('+@CampoA+')) as varchar(max)) + cast(convert(decimal(18,2), '+@CampoA+') as varchar)'
+               + char(13)
+               + 'WHEN dbo.fnEsNumerico('+'''' +@ValorDefectoA+ ''''+ ') = 1 THEN ' +char(13)
+               + 'REPLICATE (''0'', '+cast(@LongitudA as varchar)+' - LEN(' +''''+@ValorDefectoA+''''+ ')) + CONVERT ( varchar(max) , cast (' +''''+@ValorDefectoA+''''+ ' as decimal (12,2)) ) END + '
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+               
+              IF @TipoDatoA IN ('Int','Bit')
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')
+               +'cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) + '
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+
+               --//
+              IF @FormatoColumnaA = 'Fecha AMD'
+               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''yyyyMMdd'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               --//+''''+@ValorDefectoA+''''
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''yyyyMMdd'''+') '+char(13)
+               +' END + '
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '              
+               
+               --//
+              IF @FormatoColumnaA = 'Fecha DMA'
+               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''ddMMyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               --//+''''+@ValorDefectoA+''''
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''ddMMyyyy'''+') '
+               +char(13)
+               +' END + '
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+
+               --//
+              IF @FormatoColumnaA = 'Fecha MDA'
+               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''MMddyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               --//+''''+@ValorDefectoA+''''
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''MMddyyyy'''+') '
+               +char(13)
+               +' END + '
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+
+               SELECT @ConsultaPos = SUBSTRING (@ConsultaPre, 1, Len(@ConsultaPre) - 1 )
+               --//SELECT @ConsultaPos as ConsultaCompletaEncabezado
+
+            END
+ 
+ --//FORMATO ANCHO FIJO SIN CEROS SIN DECIMALES
+
+            IF @FormatoLayout = 'Ancho Fijo' AND (@CeroIzq IS NULL OR @CeroIzq = 0) AND (@PuntoDecimal IS NULL OR @PuntoDecimal = 0)
+             BEGIN
+               
+               IF @EspacioCantidad IS NULL SET @EspacioCantidad = 5
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')
+               
+               IF @FormatoColumnaA IN ('Fecha DMA', 'Fecha AMD', 'Fecha MDA')
+               BEGIN
+               DECLARE @FormatoF2 varchar(10)
+
+               IF @FormatoColumnaA = 'Fecha DMA' SET @FormatoF2 = 'ddMMyyyy'
+               IF @FormatoColumnaA = 'Fecha AMD' SET @FormatoF2 = 'yyyyMMdd'
+               IF @FormatoColumnaA = 'Fecha MDA' SET @FormatoF2 = 'MMddyyyy'
+
+               SELECT @ConsultaPre = @ConsultaPre
+               + ' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+''''+@FormatoF2+''''+') + ' + char(13)
+               + ' REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+') + '+' + '','' + '
+
+               END
+
+               ELSE 
+               SELECT @ConsultaPre = @ConsultaPre
+               + ' cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) + ' +char(13)
+               + ' REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+') + '+' + '','' + '
+
+               SELECT @ConsultaPos = SUBSTRING (@ConsultaPre, 1, Len(@ConsultaPre) - 1 )
+               --//SELECT @ConsultaPos as ConsultaCompletaEncabezado
+
+             END
+
+--========================
+-- TERMINA ANCHO FIJO CSV
+--========================
+
+--=================
+-- SEPARADOR CSV:
+--=================
+
+--// FORMATO SEPARADOR CON CEROS:
+
+          IF @FormatoLayout = 'Separador' AND @CeroIzq = 1 AND (@PuntoDecimal IS NULL OR @PuntoDecimal = 0)
+           BEGIN
+             
+             IF @TipoDatoA = 'Varchar'
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')
+               +'cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) '
+               + ' + '','' + '
+               
+              IF @TipoDatoA IN ('Float','Money')
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')
+               + 'CASE'+char(13)
+               + 'WHEN dbo.fnEsNumerico(' +@CampoA+ ') = 1 THEN ' + char(13)               
+               + 'cast(REPLICATE(''0'', '+cast(@LongitudA as varchar)+' - LEN('+@CampoA+')) as varchar(max)) + ' 
+               + 'cast(isnull('+@CampoA+', '+''''+@ValorDefectoA+''''+') as varchar ) ' +char(13)               
+               + 'WHEN dbo.fnEsNumerico('+'''' +@ValorDefectoA+ ''''+ ') = 1 THEN ' +char(13) --//
+               +' REPLICATE (''0'', '+cast(@LongitudA as varchar)+' - LEN(' +''''+@ValorDefectoA+''''+ ')) +' + ''''+@ValorDefectoA+''''+ ' END '
+               + ' + '','' + '
+
+              IF @TipoDatoA IN ('Int','Bit')
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')
+               +'cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) + '
+               + ' + '','' + '
+                 
+               --//
+               IF @FormatoColumnaA = 'Fecha AMD'
+               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''yyyyMMdd'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               --//+''''+@ValorDefectoA+''''
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''yyyyMMdd'''+') '+char(13)
+               +' END '
+               + ' + '','' + '
+               
+               --//
+               IF @FormatoColumnaA = 'Fecha DMA'
+               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''ddMMyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               --//+''''+@ValorDefectoA+''''
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''ddMMyyyy'''+') '+char(13)
+               +' END '
+               + ' + '','' + '
+
+               --//
+               IF @FormatoColumnaA = 'Fecha MDA'
+               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''MMddyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               --//+''''+@ValorDefectoA+''''
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''MMddyyyy'''+') '+char(13)
+               +' END '
+               + ' + '','' + '
+               
+               SELECT @ConsultaPos = SUBSTRING (@ConsultaPre, 1, Len(@ConsultaPre) - 1 )
+               --//SELECT @ConsultaPos as ConsultaCompletaEncabezado
+
+            END
+
+--//FORMATO SEPARADOR CON DECIMALES:
+
+          IF @FormatoLayout = 'Separador' AND @PuntoDecimal = 1 AND (@CeroIzq IS NULL OR @CeroIzq = 0)
+           BEGIN
+            
+              IF @TipoDatoA = 'Varchar'
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')
+               +'cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) '
+               + ' + '','' + '
+               
+              IF @TipoDatoA IN ('Float','Money')
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')               
+               + 'CASE'+char(13)
+               + 'WHEN dbo.fnEsNumerico(' +@CampoA+ ') = 1 THEN ' + char(13)
+               + 'cast(isnull('+'CONVERT(DECIMAL(18,2), '+@CampoA+') , '+''''+@ValorDefectoA+''''+') as varchar ) ' +char(13)
+               + 'WHEN dbo.fnEsNumerico('+'''' +@ValorDefectoA+ ''''+ ') = 1 THEN ' +char(13)
+               + 'CONVERT ( varchar(max) , cast (' +''''+@ValorDefectoA+''''+ ' as decimal (12,2)) ) END  ' + char(13)
+               + ' + '','' + ' 
+                
+              IF @TipoDatoA IN ('Int','Bit')
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')
+               +'cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) + '
+               + ' + '','' + '  
+                      
+               --//
+              IF @FormatoColumnaA = 'Fecha AMD'
+               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''yyyyMMdd'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               --//+''''+@ValorDefectoA+''''
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''yyyyMMdd'''+') '+char(13)
+               +' END  '
+               + ' + '','' + '
+
+               --//
+              IF @FormatoColumnaA = 'Fecha DMA'
+               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''ddMMyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''ddMMyyyy'''+') '+char(13)
+               +' END  '
+               + ' + '','' + '
+               
+               --//
+              IF @FormatoColumnaA = 'Fecha MDA'
+               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''MMddyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''MMddyyyy'''+') '+char(13)
+               +' END  '
+               + ' + '','' + '
+
+               SELECT @ConsultaPos = SUBSTRING (@ConsultaPre, 1, Len(@ConsultaPre) - 1 )
+               --//SELECT @ConsultaPos as ConsultaCompletaEncabezadoDECIMAL
+
+            END
+
+--// FORMATO SEPARADOR CON CEROS Y CON DECIMALES
+
+          IF @FormatoLayout = 'Separador' AND @CeroIzq = 1 AND @PuntoDecimal = 1
+           BEGIN
+             
+              IF @TipoDatoA = 'Varchar'
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')
+               +'cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) '
+               + ' + '','' + '
+               
+              IF @TipoDatoA IN ('Float','Money')
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')               
+               + 'CASE'+char(13)
+               + 'WHEN dbo.fnEsNumerico(' +@CampoA+ ') = 1 THEN ' + char(13)
+               + 'cast(REPLICATE(''0'', '+cast(@LongitudA as varchar)+' - LEN('+@CampoA+')) as varchar(max)) + cast(convert(decimal(18,2), '+@CampoA+') as varchar)'
+               + char(13)
+               + 'WHEN dbo.fnEsNumerico('+'''' +@ValorDefectoA+ ''''+ ') = 1 THEN ' +char(13)
+               + 'REPLICATE (''0'', '+cast(@LongitudA as varchar)+' - LEN(' +''''+@ValorDefectoA+''''+ ')) + CONVERT ( varchar(max) , cast (' +''''+@ValorDefectoA+''''+ ' as decimal (12,2)) ) END '
+               + ' + '','' + '
+
+              IF @TipoDatoA IN ('Int','Bit')
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')
+               +'cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) + '
+               + ' + '','' + '  
+               --//
+              IF @FormatoColumnaA = 'Fecha AMD'
+               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''yyyyMMdd'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               --//+''''+@ValorDefectoA+''''
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''yyyyMMdd'''+') '+char(13)
+               +' END  '
+               + ' + '','' + '
+               
+               --//
+              IF @FormatoColumnaA = 'Fecha DMA'
+               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''ddMMyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               --//+''''+@ValorDefectoA+''''
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''ddMMyyyy'''+') '+char(13)
+               +' END  '
+               + ' + '','' + '
+
+                --//
+              IF @FormatoColumnaA = 'Fecha MDA'
+               
+               SELECT @ConsultaPre = @ConsultaPre +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''MMddyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               --//+''''+@ValorDefectoA+''''
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''MMddyyyy'''+') '+char(13)
+               +' END  '
+               + ' + '','' + '
+
+               SELECT @ConsultaPos = SUBSTRING (@ConsultaPre, 1, Len(@ConsultaPre) - 1 )               
+               --//SELECT @ConsultaPos as ConsultaCompletaEncabezado
+
+            END
+ 
+ --//FORMATO SEPARADOR SIN CEROS SIN DECIMALES
+
+            IF @FormatoLayout = 'Separador' AND (@CeroIzq IS NULL OR @CeroIzq = 0) AND (@PuntoDecimal IS NULL OR @PuntoDecimal = 0)
+             BEGIN
+               
+               SELECT @ConsultaPre = isnull(@ConsultaPre,'')
+               
+               IF @FormatoColumnaA IN ('Fecha DMA', 'Fecha AMD', 'Fecha MDA')
+               BEGIN
+               DECLARE @FormatoF3 varchar(10)
+
+               IF @FormatoColumnaA = 'Fecha DMA' SET @FormatoF3 = 'ddMMyyyy'
+               IF @FormatoColumnaA = 'Fecha AMD' SET @FormatoF3 = 'yyyyMMdd'
+               IF @FormatoColumnaA = 'Fecha MDA' SET @FormatoF3 = 'MMddyyyy'
+
+               SELECT @ConsultaPre = @ConsultaPre
+               + ' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+''''+@FormatoF3+''''+') + ' + char(13)
+               + ' + '','' + '
+
+               END
+
+               ELSE 
+               SELECT @ConsultaPre = @ConsultaPre
+               + ' cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) + ' +char(13)
+               + ' + '','' + ' --//+ char(13)
+
+               SELECT @ConsultaPos = SUBSTRING (@ConsultaPre, 1, Len(@ConsultaPre) - 1 )
+               --//SELECT @ConsultaPos as ConsultaCompletaEncabezado
+
+             END
+
+
+--===============================
+-- TERMINA FORMATO SEPARADOR CSV
+--===============================
+  
+    --//Consulta    
+    --//Llena tabla layout
+
+               IF @DiasArchivo = 'Todo' AND @CtaDinD IS NOT NULL
+                BEGIN
+
+                 SET @SQL = ' DELETE FROM vicLayoutSalidaINSERTEnc '+char(13)
+                           +' INSERT INTO vicLayoutSalidaINSERTEnc (ID, Reg) '+char(13)
+                           +' SELECT top 1 max (ID), + '+@ConsultaPos+' FROM '+@TablaEncabezado +char(13)
+                           +' WHERE isnull(Empresa,'''') = '+ 'isnull('+''''+@Empresa+''''+', isnull(Empresa, ''''))' +char(13)
+                           +' AND '+ @CuentaDinCampo + ' = '+''''+ @CtaDinD + ''''+char(13)
+                           +' GROUP BY '+@Group2
+                        
+                 EXEC (@SQL)
+
+                END
+
+               IF @DiasArchivo = 'Todo' AND (@CtaDinD IS NULL OR @CtaDinD IN ('',' ')) 
+                BEGIN
+
+                 SET @SQL = ' DELETE FROM vicLayoutSalidaINSERTEnc '+char(13)
+                           +' INSERT INTO vicLayoutSalidaINSERTEnc (ID, Reg) '+char(13)
+                           +' SELECT top 1 max (ID), + '+@ConsultaPos+' FROM '+@TablaEncabezado +char(13)
+                           +' WHERE isnull(Empresa,'''') = '+ 'isnull('+''''+@Empresa+''''+', isnull(Empresa, ''''))' +char(13)
+                           +' GROUP BY '+@Group2
+                        
+                 EXEC (@SQL)
+
+                END
+                
+               IF @DiasArchivo = 'Del dia' AND @CtaDinD IS NOT NULL
+                BEGIN
+                 SET @SQL = ' DELETE FROM vicLayoutSalidaINSERTEnc '+char(13)
+                           +' INSERT INTO vicLayoutSalidaINSERTEnc (ID, Reg) '+char(13)
+                           +' SELECT top 1 max (ID), + '+@ConsultaPos+' FROM '+@TablaEncabezado +char(13)
+                           +' WHERE FechaEmision = '+''''+cast(cast(getdate() as date) as varchar)+'''' +char(13)
+                           +' AND isnull(Empresa,'''') = '+ 'isnull('+''''+@Empresa+''''+', isnull(Empresa, ''''))' +char(13)
+                           +' AND '+ @CuentaDinCampo + ' = '+''''+ @CtaDinD + ''''+char(13)
+                           +' GROUP BY '+@Group2
+
+                 EXEC (@SQL)
+
+                END
+
+               IF @DiasArchivo = 'Del dia' AND (@CtaDinD IS NULL OR @CtaDinD IN ('',' ')) 
+                BEGIN
+                 SET @SQL = ' DELETE FROM vicLayoutSalidaINSERTEnc '+char(13)
+                           +' INSERT INTO vicLayoutSalidaINSERTEnc (ID, Reg) '+char(13)
+                           +' SELECT top 1 max (ID), + '+@ConsultaPos+' FROM '+@TablaEncabezado +char(13)
+                           +' WHERE FechaEmision = '+''''+cast(cast(getdate() as date) as varchar)+'''' +char(13)
+                           +' AND isnull(Empresa,'''') = '+ 'isnull('+''''+@Empresa+''''+', isnull(Empresa, ''''))' +char(13)
+                           +' GROUP BY '+@Group2
+
+                 EXEC (@SQL)
+
+                END
+
+               IF @DiasArchivo = 'Del dia anterior' AND @CtaDinD IS NOT NULL
+                BEGIN
+                 SET @SQL = ' DELETE FROM vicLayoutSalidaINSERTEnc '+char(13)
+                           +' INSERT INTO vicLayoutSalidaINSERTEnc (ID, Reg) '+char(13)
+                           +' SELECT top 1 max (ID), + '+@ConsultaPos+' FROM '+@TablaEncabezado +char(13)
+                           +' WHERE FechaEmision = '+''''+cast(cast(dateadd(day,-1,getdate()) as date) as varchar)+'''' +char(13)
+                           +' AND isnull(Empresa,'''') = '+ 'isnull('+''''+@Empresa+''''+', isnull(Empresa, ''''))' +char(13)
+                           +' AND '+ @CuentaDinCampo + ' = '+''''+ @CtaDinD + ''''+char(13)
+                           +' GROUP BY '+@Group2
+
+                 EXEC (@SQL)
+
+                END
+             
+               IF @DiasArchivo = 'Del dia anterior' AND (@CtaDinD IS NULL OR @CtaDinD IN ('',' '))  
+                BEGIN
+                 SET @SQL = ' DELETE FROM vicLayoutSalidaINSERTEnc '+char(13)
+                           +' INSERT INTO vicLayoutSalidaINSERTEnc (ID, Reg) '+char(13)
+                           +' SELECT top 1 max (ID), + '+@ConsultaPos+' FROM '+@TablaEncabezado +char(13)
+                           +' WHERE FechaEmision = '+''''+cast(cast(dateadd(day,-1,getdate()) as date) as varchar)+'''' +char(13)
+                           +' AND isnull(Empresa,'''') = '+ 'isnull('+''''+@Empresa+''''+', isnull(Empresa, ''''))' +char(13)
+                           +' GROUP BY '+@Group2
+
+                 EXEC (@SQL)
+
+                END
+
+                IF @DiasArchivo = 'De la semana' AND @CtaDinD IS NOT NULL
+                 BEGIN                  
+                  
+                  IF DATEPART(WEEKDAY, @Hoy) = 1 SELECT @FechaD = getdate()
+                  IF DATEPART(WEEKDAY, @Hoy) = 2 SELECT @FechaD = DATEADD(DAY,-1,getdate())
+                  IF DATEPART(WEEKDAY, @Hoy) = 3 SELECT @FechaD = DATEADD(DAY,-2,getdate()) 
+                  IF DATEPART(WEEKDAY, @Hoy) = 4 SELECT @FechaD = DATEADD(DAY,-3,getdate())
+                  IF DATEPART(WEEKDAY, @Hoy) = 5 SELECT @FechaD = DATEADD(DAY,-4,getdate())
+                  IF DATEPART(WEEKDAY, @Hoy) = 6 SELECT @FechaD = DATEADD(DAY,-5,getdate())
+                  IF DATEPART(WEEKDAY, @Hoy) = 7 SELECT @FechaD = DATEADD(DAY,-6,getdate())
+
+                  --//SELECT @FechaD as Desde                  
+                  SET @SQL = ' DELETE FROM vicLayoutSalidaINSERTEnc '+char(13)
+                            +' INSERT INTO vicLayoutSalidaINSERTEnc (ID, Reg) ' +char(13)
+                            +' SELECT top 1 max (ID), + '+@ConsultaPos+' FROM '+@TablaEncabezado +char(13)
+                            +' WHERE FechaEmision BETWEEN '+''''+cast(cast(@FechaD as date) as varchar)+''''+' AND '+
+                            ''''+cast(cast(GETDATE() as date) as varchar)+'''' +char(13)
+                            +' AND isnull(Empresa,'''') = '+ 'isnull('+''''+@Empresa+''''+', isnull(Empresa, ''''))' +char(13)
+                            +' AND '+ @CuentaDinCampo + ' = '+''''+ @CtaDinD + ''''+char(13)
+                            +' GROUP BY '+@Group2
+
+                  EXEC (@SQL)
+
+                 END
+               
+                IF @DiasArchivo = 'De la semana' AND (@CtaDinD IS NULL OR @CtaDinD IN ('',' ')) 
+                 BEGIN                  
+                  
+                  IF DATEPART(WEEKDAY, @Hoy) = 1 SELECT @FechaD = getdate()
+                  IF DATEPART(WEEKDAY, @Hoy) = 2 SELECT @FechaD = DATEADD(DAY,-1,getdate())
+                  IF DATEPART(WEEKDAY, @Hoy) = 3 SELECT @FechaD = DATEADD(DAY,-2,getdate()) 
+                  IF DATEPART(WEEKDAY, @Hoy) = 4 SELECT @FechaD = DATEADD(DAY,-3,getdate())
+                  IF DATEPART(WEEKDAY, @Hoy) = 5 SELECT @FechaD = DATEADD(DAY,-4,getdate())
+                  IF DATEPART(WEEKDAY, @Hoy) = 6 SELECT @FechaD = DATEADD(DAY,-5,getdate())
+                  IF DATEPART(WEEKDAY, @Hoy) = 7 SELECT @FechaD = DATEADD(DAY,-6,getdate())
+
+                  --//SELECT @FechaD as Desde
+                  
+                  SET @SQL = ' DELETE FROM vicLayoutSalidaINSERTEnc '+char(13)
+                            +' INSERT INTO vicLayoutSalidaINSERTEnc (ID, Reg) ' +char(13)
+                            +' SELECT top 1 max (ID), + '+@ConsultaPos+' FROM '+@TablaEncabezado +char(13)
+                            +' WHERE FechaEmision BETWEEN '+''''+cast(cast(@FechaD as date) as varchar)+''''+' AND '+
+                            ''''+cast(cast(GETDATE() as date) as varchar)+'''' +char(13)
+                            +' AND isnull(Empresa,'''') = '+ 'isnull('+''''+@Empresa+''''+', isnull(Empresa, ''''))' +char(13)
+                            +' GROUP BY '+@Group2
+
+                  EXEC (@SQL)
+
+                 END
+
+               FETCH NEXT FROM CurEncabezadoCsv INTO @CampoA, @ValorDefectoA, @TipoDatoA, @FormatoColumnaA, @LongitudA
+
+             END
+            --SELECT @EncabezadoArchivo as Encabezadotxt
+           CLOSE CurEncabezadoCsv
+          DEALLOCATE CurEncabezadoCsv --// Termina cursor que Genera cadena encabezado de archivo csv
+
+        END --// BEGIN de IF @TipoArchivo = 'csv'
+
+--======================
+-- TERMINA ARCHIVO CSV
+--======================
+
+--=============================================================================
+-- ************************** TERMINA ENCABEZADO ******************************
+--=============================================================================
+
+--=========================================================================================
+-- ************************************ INICIA DETALLE ************************************
+--=========================================================================================
+
+--===============
+-- TXT: DETALLE
+--===============
+
+--//*DETALLE TXT
+       IF @TipoArchivo = 'txt'
+        BEGIN
+        
+        --//Genera cadena ENCABEZADO de archivo txt
+         DECLARE CurDetalleTxt CURSOR LOCAL FOR
+           SELECT Campo, ValorDefecto, TipoDato, FormatoColumna, Longitud
+           FROM vicCfgLayoutSalidaDGral
+           WHERE Nombre = @Layout
+           AND Ubicacion = 'Detalle'
+           
+           SET @DetalleArchivo = ''
+
+           OPEN CurDetalleTxt
+           FETCH NEXT FROM CurDetalleTxt INTO @CampoA, @ValorDefectoA, @TipoDatoA, @FormatoColumnaA, @LongitudA
+            WHILE @@FETCH_STATUS = 0
+              BEGIN               
+
+               IF @SeparadorFormato = 'pipe' SET @Separador = '|'
+               IF @SeparadorFormato = 'diagonal' SET @Separador = '/'
+               
+               SELECT @TablaDetalle = @TablaBD
+
+               --IF @TablaBD = 'Gastos' SET @TablaDetalle = 'GastoDetalle'
+
+--===========================
+-- ANCHO FIJO: DETALLE
+--===========================
+
+--// FORMATO ANCHO FIJO CON CEROS:
+
+          IF @FormatoLayout = 'Ancho Fijo' AND @CeroIzq = 1 AND (@PuntoDecimal IS NULL OR @PuntoDecimal = 0)
+           BEGIN
+           
+              IF @EspacioCantidad IS NULL SET @EspacioCantidad = 5 
+                            
+              IF @TipoDatoA = 'Varchar'
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')
+              +' cast(isnull(RTRIM(LEFT('+@CampoA+', '+CONVERT(varchar(max), @LongitudA)+ ')) , '+'RTRIM(LEFT('+''''+CONVERT(varchar(max),@ValorDefectoA)+''''+','+ CONVERT(varchar(max), @LongitudA) + '))) as varchar) + ' +CHAR(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               --ANTERIOR: +' REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN(ISNULL('+@CampoA +',' +cast(+''''+@ValorDefectoA+'''' as varchar) +')) + ' + cast(@EspacioCantidad as varchar)+  ' )' + ' + '
+               --EJEMPLO:  + REPLICATE (' ',  5                              - LEN( cast(isnull(LEFT(         Mov,                                    5) , LEFT('CHEQUE'                    ,                                 5    )) as varchar))+ 5)
+              +' REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN( cast(isnull(RTRIM(LEFT('+@CampoA +','+CONVERT(varchar(max), @LongitudA)+')) , RTRIM(LEFT('+''''+@ValorDefectoA+''''+','+CONVERT(varchar(max), @LongitudA) +'))) as varchar)) + ' + cast(@EspacioCantidad as varchar)+  ' )' + ' + '
+
+              IF @TipoDatoA IN ('Float','Money')
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')
+               + 'CASE'+char(13)
+               + 'WHEN dbo.fnEsNumerico(' +@CampoA+ ') = 1 THEN ' + char(13)               
+               + 'cast(REPLICATE(''0'', '+cast(@LongitudA as varchar)+' - LEN('+@CampoA+')) as varchar(max)) + ' 
+               + 'cast(isnull('+@CampoA+', '+''''+@ValorDefectoA+''''+') as varchar ) ' +char(13)               
+               
+               + 'WHEN dbo.fnEsNumerico('+'''' +@ValorDefectoA+ ''''+ ') = 1 THEN ' +char(13) --//
+               + 'REPLICATE (''0'', '+cast(@LongitudA as varchar)+' - LEN(' +''''+@ValorDefectoA+''''+ ')) +' + ''''+@ValorDefectoA+''''+ ' END + '
+               +' REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '               
+
+              IF @TipoDatoA IN ('Int', 'Bit')
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')
+               +' cast(isnull(RTRIM(LEFT('+@CampoA+', '+CONVERT(varchar(max), @LongitudA)+ ')) , '+'RTRIM(LEFT('+''''+CONVERT(varchar(max),@ValorDefectoA)+''''+','+ CONVERT(varchar(max), @LongitudA) + '))) as varchar) + ' + CHAR(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN( cast(isnull(RTRIM(LEFT('+@CampoA +','+CONVERT(varchar(max), @LongitudA)+')) , RTRIM(LEFT('+''''+@ValorDefectoA+''''+','+CONVERT(varchar(max), @LongitudA) +'))) as varchar)) + ' + cast(@EspacioCantidad as varchar)+  ' )' + ' + '
+          
+               --//AMD
+              IF @FormatoColumnaA = 'Fecha AMD'
+               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''yyyyMMdd'')' + ' + ' + char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '', ' + cast(@LongitudA as varchar)+ ' - LEN('+ 'FORMAT(cast('+@CampoA+ ' as date), ''yyyyMMdd'')' +') + ' + cast(@EspacioCantidad as varchar)+  ' )'
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               --//+''''+@ValorDefectoA+''''
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''yyyyMMdd'''+') ' + ' + ' +char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN(ISNULL('+@CampoA +',' +cast(+''''+@ValorDefectoA+'''' as varchar) +')) + ' + cast(@EspacioCantidad as varchar)+  ' )'
+               +' END  + '
+
+               --//DMA
+              IF @FormatoColumnaA = 'Fecha DMA'
+               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''ddMMyyyy'')' + ' + '+ char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '', ' + cast(@LongitudA as varchar)+ ' - LEN('+ 'FORMAT(cast('+@CampoA+ ' as date), ''ddMMyyyy'')' +') + ' + cast(@EspacioCantidad as varchar)+  ' )' 
+               +' WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''ddMMyyyy'''+') ' + ' + ' +char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN(ISNULL('+@CampoA +',' +cast(+''''+@ValorDefectoA+'''' as varchar) +')) + ' + cast(@EspacioCantidad as varchar)+  ' )'
+               +' END  + '
+
+               --//MDA
+              IF @FormatoColumnaA = 'Fecha MDA'
+               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''MMddyyyy'')' + ' + '+ char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '', ' + cast(@LongitudA as varchar)+ ' - LEN('+ 'FORMAT(cast('+@CampoA+ ' as date), ''MMddyyyy'')' +') + ' + cast(@EspacioCantidad as varchar)+  ' )' 
+               +' WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''MMddyyyy'''+') ' + ' + ' +char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' + REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN(ISNULL('+@CampoA +',' +cast(+''''+@ValorDefectoA+'''' as varchar) +')) + ' + cast(@EspacioCantidad as varchar)+  ' )'
+               +' END  + '
+               
+               SELECT @ConsultaPosB = SUBSTRING (@ConsultaPreB, 1, Len(@ConsultaPreB) - 1 )
+               
+               --//SELECT @ConsultaPosB as ConsultaCompletaDetalle
+
+            END
+
+--//FORMATO ANCHO FIJO CON DECIMALES:
+
+          IF @FormatoLayout = 'Ancho Fijo' AND @PuntoDecimal = 1 AND (@CeroIzq IS NULL OR @CeroIzq = 0)
+           BEGIN
+               
+              IF @EspacioCantidad IS NULL SET @EspacioCantidad = 5
+
+              IF @TipoDatoA = 'Varchar'
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')
+              +' cast(isnull(RTRIM(LEFT('+@CampoA+', '+CONVERT(varchar(max), @LongitudA)+ ')) , '+'RTRIM(LEFT('+''''+CONVERT(varchar(max),@ValorDefectoA)+''''+','+ CONVERT(varchar(max), @LongitudA) + '))) as varchar) + ' +CHAR(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               --ANTERIOR: +' REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN(ISNULL('+@CampoA +',' +cast(+''''+@ValorDefectoA+'''' as varchar) +')) + ' + cast(@EspacioCantidad as varchar)+  ' )' + ' + '
+               --EJEMPLO:  + REPLICATE (' ',  5                              - LEN( cast(isnull(LEFT(         Mov,                                    5) , LEFT('CHEQUE'                    ,                                 5    )) as varchar))+ 5)
+              +' REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN( cast(isnull(RTRIM(LEFT('+@CampoA +','+CONVERT(varchar(max), @LongitudA)+')) , RTRIM(LEFT('+''''+@ValorDefectoA+''''+','+CONVERT(varchar(max), @LongitudA) +'))) as varchar)) + ' + cast(@EspacioCantidad as varchar)+  ' )' + ' + '
+               
+              IF @TipoDatoA IN ('Float','Money') 
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')               
+               + 'CASE'+char(13)
+               + 'WHEN dbo.fnEsNumerico(' +@CampoA+ ') = 1 THEN ' + char(13)                
+               + 'cast(isnull('+'CONVERT(DECIMAL(18,2), '+@CampoA+') , '+''''+@ValorDefectoA+''''+') as varchar ) '+char(13)               
+               + 'WHEN dbo.fnEsNumerico('+'''' +@ValorDefectoA+ ''''+ ') = 1 THEN ' +char(13)
+               + 'CONVERT ( varchar(max) , cast (' +''''+@ValorDefectoA+''''+ ' as decimal (12,2)) ) END + ' + char(13)
+               --//RESPETA POSICIÓN LAYOUT:                               
+               +' REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN(ISNULL('+'CONVERT(DECIMAL(18,2), '+@CampoA+') '+',' +cast(+''''+@ValorDefectoA+'''' as varchar) +')) + ' + cast(@EspacioCantidad as varchar) + ' )'  + ' + ' 
+ 
+              IF @TipoDatoA IN ('Int', 'Bit')
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')
+               +' cast(isnull(RTRIM(LEFT('+@CampoA+', '+CONVERT(varchar(max), @LongitudA)+ ')) , '+'RTRIM(LEFT('+''''+CONVERT(varchar(max),@ValorDefectoA)+''''+','+ CONVERT(varchar(max), @LongitudA) + '))) as varchar) + ' +CHAR(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN( cast(isnull(RTRIM(LEFT('+@CampoA +','+CONVERT(varchar(max), @LongitudA)+')) , RTRIM(LEFT('+''''+@ValorDefectoA+''''+','+CONVERT(varchar(max), @LongitudA) +'))) as varchar)) + ' + cast(@EspacioCantidad as varchar)+  ' )' + ' + '
+               
+               --//AMD
+              IF @FormatoColumnaA = 'Fecha AMD'               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''yyyyMMdd'')' + ' + ' + char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '', ' + cast(@LongitudA as varchar)+ ' - LEN('+ 'FORMAT(cast('+@CampoA+ ' as date), ''yyyyMMdd'')' +') + ' + cast(@EspacioCantidad as varchar)+  ' )'
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               --//+''''+@ValorDefectoA+''''
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''yyyyMMdd'''+') ' + ' + ' +char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN(ISNULL('+@CampoA +',' +cast(+''''+@ValorDefectoA+'''' as varchar) +')) + ' + cast(@EspacioCantidad as varchar)+  ' )'
+               +' END  + '
+
+               --//DMA
+              IF @FormatoColumnaA = 'Fecha DMA'               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''ddMMyyyy'')' + ' + '+ char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '', ' + cast(@LongitudA as varchar)+ ' - LEN('+ 'FORMAT(cast('+@CampoA+ ' as date), ''ddMMyyyy'')' +') + ' + cast(@EspacioCantidad as varchar)+  ' )' 
+               +' WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''ddMMyyyy'''+') ' + ' + ' +char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN(ISNULL('+@CampoA +',' +cast(+''''+@ValorDefectoA+'''' as varchar) +')) + ' + cast(@EspacioCantidad as varchar)+  ' )'
+               +' END  + '
+
+               --//MDA
+              IF @FormatoColumnaA = 'Fecha MDA'               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''MMddyyyy'')' + ' + '+ char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '', ' + cast(@LongitudA as varchar)+ ' - LEN('+ 'FORMAT(cast('+@CampoA+ ' as date), ''MMddyyyy'')' +') + ' + cast(@EspacioCantidad as varchar)+  ' )' 
+               +' WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''MMddyyyy'''+') ' + ' + ' +char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' + REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN(ISNULL('+@CampoA +',' +cast(+''''+@ValorDefectoA+'''' as varchar) +')) + ' + cast(@EspacioCantidad as varchar)+  ' )'
+               +' END  + '
+               
+               SELECT @ConsultaPosB = SUBSTRING (@ConsultaPreB, 1, Len(@ConsultaPreB) - 1 )
+               
+               --//SELECT @ConsultaPosB as ConsultaCompletaDetalle
+
+            END
+
+--// FORMATO ANCHO FIJO CON CEROS Y CON DECIMALES
+
+          IF @FormatoLayout = 'Ancho Fijo' AND @CeroIzq = 1 AND @PuntoDecimal = 1
+           BEGIN
+               
+              IF @EspacioCantidad IS NULL SET @EspacioCantidad = 5
+             
+              IF @TipoDatoA = 'Varchar'
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')
+              +' cast(isnull(RTRIM(LEFT('+@CampoA+', '+CONVERT(varchar(max), @LongitudA)+ ')) , '+'RTRIM(LEFT('+''''+CONVERT(varchar(max),@ValorDefectoA)+''''+','+ CONVERT(varchar(max), @LongitudA) + '))) as varchar) + ' +CHAR(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               --ANTERIOR: +' REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN(ISNULL('+@CampoA +',' +cast(+''''+@ValorDefectoA+'''' as varchar) +')) + ' + cast(@EspacioCantidad as varchar)+  ' )' + ' + '
+               --EJEMPLO:  + REPLICATE (' ',  5                              - LEN( cast(isnull(LEFT(         Mov,                                    5) , LEFT('CHEQUE'                    ,                                 5    )) as varchar))+ 5)
+              +' REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN( cast(isnull(RTRIM(LEFT('+@CampoA +','+CONVERT(varchar(max), @LongitudA)+')) , RTRIM(LEFT('+''''+@ValorDefectoA+''''+','+CONVERT(varchar(max), @LongitudA) +'))) as varchar)) + ' + cast(@EspacioCantidad as varchar)+  ' )' + ' + '
+                           
+              IF @TipoDatoA IN ('Float','Money')  
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')               
+               + 'CASE'+char(13)
+               + 'WHEN dbo.fnEsNumerico(' +@CampoA+ ') = 1 THEN ' + char(13)
+               --//cast(REPLICATE('0',                               10 - LEN(CONVERT(Decimal(18,2), Ejercicio ))) as varchar(max)) + cast(convert(decimal(18,2), Ejercicio) as varchar)
+               + 'cast(REPLICATE(''0'', '+cast(@LongitudA as varchar)+' - LEN(convert(decimal(18,2),'+@CampoA+'))) as varchar(max)) + cast(convert(decimal(18,2), '+@CampoA+') as varchar)' + char(13)
+               
+               + 'WHEN dbo.fnEsNumerico('+'''' +@ValorDefectoA+ ''''+ ') = 1 THEN ' +char(13)
+              --//REPLICATE ('0'  ,                              10 - LEN( CONVERT(Decimal(18,2),                         '2019'))) + CONVERT ( varchar(max) , cast ('2019' as decimal (18,2)) )
+               + 'REPLICATE (''0'', '+cast(@LongitudA as varchar)+' - LEN( CONVERT(Decimal(18,2), ' +''''+@ValorDefectoA+''''+ '))) + CONVERT ( varchar(max) , cast (' +''''+@ValorDefectoA+''''+ ' as decimal (12,2)) ) END +'
+               --//RESPETA POSICIÓN LAYOUT:                              
+               +' REPLICATE ('' '',' +cast(@LongitudA as varchar)+' - LEN(ISNULL('+'cast(REPLICATE(''0'', '+cast(@LongitudA as varchar)+' - LEN(CONVERT(Decimal(18,2),'+ @CampoA+'))) as varchar(max)) + cast(convert(decimal(18,2), '+@CampoA+') as varchar),'
+               +' REPLICATE (''0'',' +cast(@LongitudA as varchar)+' - LEN( CONVERT(Decimal(18,2), '+''''+@ValorDefectoA+''''+'))) + CONVERT ( varchar(max) , cast ('+''''+@ValorDefectoA+''''+' as decimal (18,2)) ))) + ' +cast(@EspacioCantidad as varchar) +  ' ) + ' 
+
+              IF @TipoDatoA IN ('Int', 'Bit')
+SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')
++ 'CASE'+char(13)
++ 'WHEN dbo.fnEsNumerico(' +@CampoA+ ') = 1 THEN ' + char(13)
+--//cast(REPLICATE('0',                               10 - LEN(CONVERT(Decimal(18,2), Ejercicio ))) as varchar(max)) + cast(convert(decimal(18,2), Ejercicio) as varchar)
++ 'cast(REPLICATE(''0'', '+cast(@LongitudA as varchar)+' - LEN(convert(varchar,'+@CampoA+'))) as varchar(max)) + cast(convert(varchar, '+@CampoA+') as varchar)' + char(13)
+
++ 'WHEN dbo.fnEsNumerico('+'''' +@ValorDefectoA+ ''''+ ') = 1 THEN ' +char(13)
+--//REPLICATE ('0'  ,                              10 - LEN( CONVERT(Decimal(18,2),                         '2019'))) + CONVERT ( varchar(max) , cast ('2019' as decimal (18,2)) )
++ 'REPLICATE (''0'', '+cast(@LongitudA as varchar)+' - LEN( CONVERT(varchar, ' +''''+@ValorDefectoA+''''+ '))) + CONVERT ( varchar(max) , cast (' +''''+@ValorDefectoA+''''+ ' as varchar) ) END +'
+--//RESPETA POSICIÓN LAYOUT:                              
++' REPLICATE ('' '',' +cast(@LongitudA as varchar)+' - LEN(ISNULL('+'cast(REPLICATE(''0'', '+cast(@LongitudA as varchar)+' - LEN(CONVERT(varchar,'+ @CampoA+'))) as varchar(max)) + cast(convert(varchar, '+@CampoA+') as varchar),'
++' REPLICATE (''0'',' +cast(@LongitudA as varchar)+' - LEN( CONVERT(varchar, '+''''+@ValorDefectoA+''''+'))) + CONVERT ( varchar(max) , cast ('+''''+@ValorDefectoA+''''+' as varchar) ))) + ' +cast(@EspacioCantidad as varchar) +  ' ) + ' 
+               --SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')
+               --+' cast(isnull(RTRIM(LEFT('+@CampoA+', '+CONVERT(varchar(max), @LongitudA)+ ')) , '+'RTRIM(LEFT('+''''+CONVERT(varchar(max),@ValorDefectoA)+''''+','+ CONVERT(varchar(max), @LongitudA) + '))) as varchar) + ' +CHAR(13)
+               ----//RESPETA POSICIÓN LAYOUT:
+               --+' REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN( cast(isnull(RTRIM(LEFT('+@CampoA +','+CONVERT(varchar(max), @LongitudA)+')) , RTRIM(LEFT('+''''+@ValorDefectoA+''''+','+CONVERT(varchar(max), @LongitudA) +'))) as varchar)) + ' + cast(@EspacioCantidad as varchar)+  ' )' + ' + '
+
+               --//AMD
+              IF @FormatoColumnaA = 'Fecha AMD'               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''yyyyMMdd'')' + ' + ' + char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '', ' + cast(@LongitudA as varchar)+ ' - LEN('+ 'FORMAT(cast('+@CampoA+ ' as date), ''yyyyMMdd'')' +') + ' + cast(@EspacioCantidad as varchar)+  ' )'
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               --//+''''+@ValorDefectoA+''''
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''yyyyMMdd'''+') ' + ' + ' +char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN(ISNULL('+@CampoA +',' +cast(+''''+@ValorDefectoA+'''' as varchar) +')) + ' + cast(@EspacioCantidad as varchar)+  ' )'
+               +' END  + '
+
+               --//DMA
+              IF @FormatoColumnaA = 'Fecha DMA'               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''ddMMyyyy'')' + ' + '+ char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '', ' + cast(@LongitudA as varchar)+ ' - LEN('+ 'FORMAT(cast('+@CampoA+ ' as date), ''ddMMyyyy'')' +') + ' + cast(@EspacioCantidad as varchar)+  ' )' 
+               +' WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''ddMMyyyy'''+') ' + ' + ' +char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN(ISNULL('+@CampoA +',' +cast(+''''+@ValorDefectoA+'''' as varchar) +')) + ' + cast(@EspacioCantidad as varchar)+  ' )'
+               +' END  + '
+
+              --//MDA
+              IF @FormatoColumnaA = 'Fecha MDA'               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''MMddyyyy'')' + ' + '+ char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '', ' + cast(@LongitudA as varchar)+ ' - LEN('+ 'FORMAT(cast('+@CampoA+ ' as date), ''MMddyyyy'')' +') + ' + cast(@EspacioCantidad as varchar)+  ' )' 
+               +' WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''MMddyyyy'''+') ' + ' + ' +char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' + REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN(ISNULL('+@CampoA +',' +cast(+''''+@ValorDefectoA+'''' as varchar) +')) + ' + cast(@EspacioCantidad as varchar)+  ' )'
+               +' END  + '
+                          
+               SELECT @ConsultaPosB = SUBSTRING (@ConsultaPreB, 1, Len(@ConsultaPreB) - 1 )
+               --//SELECT @ConsultaPosB as ConsultaCompletaDetalle
+
+            END
+ 
+ --//FORMATO ANCHO FIJO SIN CEROS SIN DECIMALES
+
+            IF @FormatoLayout = 'Ancho Fijo' AND (@CeroIzq IS NULL OR @CeroIzq = 0) AND (@PuntoDecimal IS NULL OR @PuntoDecimal = 0)
+             BEGIN
+               
+               IF @EspacioCantidad IS NULL SET @EspacioCantidad = 5
+
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')
+               
+               IF @FormatoColumnaA IN ('Fecha DMA', 'Fecha AMD', 'Fecha MDA')
+               BEGIN
+               DECLARE @FormatoF4 varchar(10)
+
+               IF @FormatoColumnaA = 'Fecha DMA' SET @FormatoF4 = 'ddMMyyyy'
+               IF @FormatoColumnaA = 'Fecha AMD' SET @FormatoF4 = 'yyyyMMdd'
+               IF @FormatoColumnaA = 'Fecha MDA' SET @FormatoF4 = 'MMddyyyy'
+
+               SELECT @ConsultaPreB = @ConsultaPreB
+               + ' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+''''+@FormatoF4+''''+') + ' + char(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               +' REPLICATE ('' '', ' + cast(@LongitudA as varchar)+ ' - LEN('+ 'FORMAT(cast('+@CampoA+ ' as date), '+''''+@FormatoF4+''''+ ')' +') + ' + cast(@EspacioCantidad as varchar)+  ' )' + ' + '
+
+               END
+
+               ELSE 
+               SELECT @ConsultaPreB = @ConsultaPreB
+               +' cast(isnull(RTRIM(LEFT('+@CampoA+', '+CONVERT(varchar(max), @LongitudA)+ ')) , '+'RTRIM(LEFT('+''''+CONVERT(varchar(max),@ValorDefectoA)+''''+','+ CONVERT(varchar(max), @LongitudA) + '))) as varchar) + ' +CHAR(13)
+               --//RESPETA POSICIÓN LAYOUT:
+               --//ANTERIOR:+' REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN(ISNULL('+@CampoA +',' +cast(+''''+@ValorDefectoA+'''' as varchar) +')) + ' + cast(@EspacioCantidad as varchar)+  ' )' + ' + '
+               +' REPLICATE ('' '','+cast(@LongitudA as varchar)+' - LEN( cast(isnull(RTRIM(LEFT('+@CampoA +','+CONVERT(varchar(max), @LongitudA)+')) , RTRIM(LEFT('+''''+@ValorDefectoA+''''+','+CONVERT(varchar(max), @LongitudA) +'))) as varchar)) + ' + cast(@EspacioCantidad as varchar)+  ' )' + ' + '
+
+               SELECT @ConsultaPosB = SUBSTRING (@ConsultaPreB, 1, Len(@ConsultaPreB) - 1 )               
+               --//SELECT @ConsultaPosB as ConsultaCompletaDetalle
+
+             END
+
+--============================
+-- TERMINA ANCHO FIJO DETALLE
+--============================
+
+--=====================
+-- SEPARADOR: DETALLE
+--=====================
+
+--// FORMATO SEPARADOR CON CEROS:
+
+          IF @FormatoLayout = 'Separador' AND @CeroIzq = 1 AND (@PuntoDecimal IS NULL OR @PuntoDecimal = 0)
+           BEGIN
+
+              IF @TipoDatoA = 'Varchar'
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')
+               +'cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) +'
+               + ''''+@Separador+''''  + ' + '
+               
+              IF @TipoDatoA IN ('Float','Money')
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')               
+               + 'CASE'+char(13)
+               + 'WHEN dbo.fnEsNumerico(' +@CampoA+ ') = 1 THEN ' + char(13)               
+               + 'cast(REPLICATE(''0'', '+cast(@LongitudA as varchar)+' - LEN('+@CampoA+')) as varchar(max)) + ' 
+               + 'cast(isnull('+@CampoA+', '+''''+@ValorDefectoA+''''+') as varchar ) ' +char(13)              
+               + 'WHEN dbo.fnEsNumerico('+'''' +@ValorDefectoA+ ''''+ ') = 1 THEN ' +char(13) --//
+               + 'REPLICATE (''0'', '+cast(@LongitudA as varchar)+' - LEN(' +''''+@ValorDefectoA+''''+ ')) +' + ''''+@ValorDefectoA+''''+ ' END + '
+               + ''''+@Separador+''''  + ' + '
+              
+              IF @TipoDatoA IN ('Int','Bit')
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')
+               +'cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) +'
+               + ''''+@Separador+''''  + ' + '
+
+               --//
+              IF @FormatoColumnaA = 'Fecha AMD'
+               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''yyyyMMdd'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''yyyyMMdd'''+') '+char(13)
+               +' END  + '
+               + ''''+@Separador+''''  + ' + '
+
+               --//
+              IF @FormatoColumnaA = 'Fecha DMA'
+               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''ddMMyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''ddMMyyyy'''+') '+char(13)
+               +' END  + '
+               + ''''+@Separador+''''  + ' + '
+
+               --//
+              IF @FormatoColumnaA = 'Fecha MDA'
+               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''MMddyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''MMddyyyy'''+') '+char(13)
+               +' END  + '
+               + ''''+@Separador+''''  + ' + '
+
+               SELECT @ConsultaPosB = SUBSTRING (@ConsultaPreB, 1, Len(@ConsultaPreB) - 1 )
+               --//SELECT @ConsultaPosB as ConsultaCompletaDetalle
+
+            END
+
+--//FORMATO SEPARADOR CON DECIMALES DET:
+
+          IF @FormatoLayout = 'Separador' AND @PuntoDecimal = 1 AND (@CeroIzq IS NULL OR @CeroIzq = 0)
+           BEGIN
+             
+              IF @TipoDatoA = 'Varchar'
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')
+               +'cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) +'
+               + ''''+@Separador+''''  + ' + '
+              
+              IF @TipoDatoA IN ('Float','Money')
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')
+               + 'CASE'+char(13)
+               + 'WHEN dbo.fnEsNumerico(' +@CampoA+ ') = 1 THEN ' + char(13)               
+               + 'cast(isnull('+'CONVERT(DECIMAL(18,2), '+@CampoA+') , '+''''+@ValorDefectoA+''''+') as varchar ) ' +char(13)               
+               + 'WHEN dbo.fnEsNumerico('+'''' +@ValorDefectoA+ ''''+ ') = 1 THEN ' +char(13)
+               + 'CONVERT ( varchar(max) , cast (' +''''+@ValorDefectoA+''''+ ' as decimal (12,2)) ) END + ' + char(13)
+               + ''''+@Separador+''''  + ' + '
+               
+              IF @TipoDatoA IN ('Int','Bit')
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')
+               +'cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) +'
+               + ''''+@Separador+''''  + ' + '
+                         
+               --//
+              IF @FormatoColumnaA = 'Fecha AMD'               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''yyyyMMdd'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''yyyyMMdd'''+') '+char(13)
+               +' END  + '
+               + ''''+@Separador+''''  + ' + '
+
+               --//
+              IF @FormatoColumnaA = 'Fecha DMA'               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''ddMMyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''ddMMyyyy'''+') '+char(13)
+               +' END  + '
+               + ''''+@Separador+''''  + ' + '
+
+               --//
+              IF @FormatoColumnaA = 'Fecha MDA'               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''MMddyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''MMddyyyy'''+') '+char(13)
+               +' END  + '
+               + ''''+@Separador+''''  + ' + '
+               
+               SELECT @ConsultaPosB = SUBSTRING (@ConsultaPreB, 1, Len(@ConsultaPreB) - 1 )
+               --//SELECT @ConsultaPosB as ConsultaCompletaDetalle
+
+            END
+
+--// FORMATO SEPARADOR CON CEROS Y CON DECIMALES
+
+          IF @FormatoLayout = 'Separador' AND @CeroIzq = 1 AND @PuntoDecimal = 1
+           BEGIN
+
+              IF @TipoDatoA = 'Varchar'
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')
+               +'cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) +'
+               + ''''+@Separador+''''  + ' + '
+              
+              IF @TipoDatoA IN ('Float','Money')
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')               
+               + 'CASE'+char(13)
+               + 'WHEN dbo.fnEsNumerico(' +@CampoA+ ') = 1 THEN ' + char(13)
+               + ' + cast(REPLICATE(''0'', '+cast(@LongitudA as varchar)+' - LEN('+@CampoA+')) as varchar(max)) + cast(convert(decimal(18,2), '+@CampoA+') as varchar)'
+               + char(13)
+               + 'WHEN dbo.fnEsNumerico('+'''' +@ValorDefectoA+ ''''+ ') = 1 THEN ' +char(13)
+               + ' + REPLICATE (''0'', '+cast(@LongitudA as varchar)+' - LEN(' +''''+@ValorDefectoA+''''+ ')) + CONVERT ( varchar(max) , cast (' +''''+@ValorDefectoA+''''+ ' as decimal (12,2)) ) END +'
+               + ''''+@Separador+''''  + ' + '
+                
+              IF @TipoDatoA IN ('Int','Bit')
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')
+               +'cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) +'
+               + ''''+@Separador+''''  + ' + '  
+                     
+               --//
+              IF @FormatoColumnaA = 'Fecha AMD'
+               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''yyyyMMdd'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''yyyyMMdd'''+') '+char(13)
+               +' END  + '
+               + ''''+@Separador+''''  + ' + '
+
+               --//
+               IF @FormatoColumnaA = 'Fecha DMA'
+               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''ddMMyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''ddMMyyyy'''+') '+char(13)
+               +' END  + '
+               + ''''+@Separador+''''  + ' + '
+
+               --//
+               IF @FormatoColumnaA = 'Fecha MDA'
+               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''MMddyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''MMddyyyy'''+') '+char(13)
+               +' END  + '
+               + ''''+@Separador+''''  + ' + '
+
+               SELECT @ConsultaPosB = SUBSTRING (@ConsultaPreB, 1, Len(@ConsultaPreB) - 1 )
+               --//SELECT @ConsultaPosB as ConsultaCompletaDetalle
+
+            END
+
+ 
+ --//FORMATO SEPARADOR SIN CEROS SIN DECIMALES
+            IF @FormatoLayout = 'Separador' AND (@CeroIzq IS NULL OR @CeroIzq = 0) AND (@PuntoDecimal IS NULL OR @PuntoDecimal = 0)
+             BEGIN
+               
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')
+               
+               IF @FormatoColumnaA IN ('Fecha DMA', 'Fecha AMD', 'Fecha MDA')
+                BEGIN
+                DECLARE @FormatoF5 varchar(10)
+
+                IF @FormatoColumnaA = 'Fecha DMA' SET @FormatoF5 = 'ddMMyyyy'
+                IF @FormatoColumnaA = 'Fecha AMD' SET @FormatoF5 = 'yyyyMMdd'
+                IF @FormatoColumnaA = 'Fecha MDA' SET @FormatoF5 = 'MMddyyyy'
+
+                SELECT @ConsultaPreB = @ConsultaPreB
+                + ' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+''''+@FormatoF5+''''+') + ' + char(13)
+                + ''''+@Separador+''''  + ' + '
+
+                END
+
+               ELSE 
+               SELECT @ConsultaPreB = @ConsultaPreB
+               + ' cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) + ' +char(13)
+               + ''''+@Separador+''''  + ' + '
+
+               SELECT @ConsultaPosB = SUBSTRING (@ConsultaPreB, 1, Len(@ConsultaPreB) - 1 )
+               --//SELECT @ConsultaPosB as ConsultaCompletaDetalle
+
+             END
+
+--===================================
+-- TERMINA FORMATO SEPARADOR TXT DET
+--===================================
+  
+    --//Consulta    
+    --//Llena tabla layout
+
+               IF @DiasArchivo = 'Todo' AND @CtaDinD IS NOT NULL
+                BEGIN
+                 SET @SQL = ' DELETE FROM vicLayoutSalidaINSERTDet '+char(13)
+                           +' INSERT INTO vicLayoutSalidaINSERTDet (ID, Reg) '+char(13)
+                           +' SELECT ID, + '+@ConsultaPosB+' FROM '+@TablaDetalle +char(13)
+                           +' WHERE isnull(Empresa,'''') = '+ 'isnull('+''''+@Empresa+''''+', isnull(Empresa, ''''))'
+                           +' AND '+ @CuentaDinCampo + ' = '+''''+ @CtaDinD + ''''+char(13)
+                           +' ORDER BY ID ASC'
+
+                 EXEC (@SQL)
+
+                END
+               
+               IF @DiasArchivo = 'Todo' AND (@CtaDinD IS NULL OR @CtaDinD IN ('',' ')) 
+                BEGIN
+                 SET @SQL = ' DELETE FROM vicLayoutSalidaINSERTDet '+char(13)
+                           +' INSERT INTO vicLayoutSalidaINSERTDet (ID, Reg) '+char(13)
+                           +' SELECT ID, + '+@ConsultaPosB+' FROM '+@TablaDetalle +char(13)
+                           +' WHERE isnull(Empresa,'''') = '+ 'isnull('+''''+@Empresa+''''+', isnull(Empresa, ''''))'
+                           +' ORDER BY ID ASC'
+                        
+                 EXEC (@SQL)                 
+
+                END
+                
+               IF @DiasArchivo = 'Del dia' AND @CtaDinD IS NOT NULL
+                BEGIN
+                 SET @SQL = ' DELETE FROM vicLayoutSalidaINSERTDet '+char(13)
+                           +' INSERT INTO vicLayoutSalidaINSERTDet (ID, Reg) '+char(13)
+                           +' SELECT ID, + '+@ConsultaPosB+' FROM '+@TablaDetalle +char(13)
+                           +' WHERE FechaEmision = '+''''+cast(cast(getdate() as date) as varchar)+'''' +char(13)
+                           +' AND isnull(Empresa,'''') = '+ 'isnull('+''''+@Empresa+''''+', isnull(Empresa, ''''))'
+                           +' AND '+ @CuentaDinCampo + ' = '+''''+ @CtaDinD + ''''+char(13)
+                           +' ORDER BY ID ASC'
+
+                 EXEC (@SQL)
+                END
+
+               IF @DiasArchivo = 'Del dia' AND (@CtaDinD IS NULL OR @CtaDinD IN ('',' ')) 
+                BEGIN
+                 SET @SQL = ' DELETE FROM vicLayoutSalidaINSERTDet '+char(13)
+                           +' INSERT INTO vicLayoutSalidaINSERTDet (ID, Reg) '+char(13)
+                           +' SELECT ID, + '+@ConsultaPosB+' FROM '+@TablaDetalle +char(13)
+                           +' WHERE FechaEmision = '+''''+cast(cast(getdate() as date) as varchar)+'''' +char(13)
+                           +' AND isnull(Empresa,'''') = '+ 'isnull('+''''+@Empresa+''''+', isnull(Empresa, ''''))'
+                           +' ORDER BY ID ASC'
+
+                 EXEC (@SQL)
+                END
+
+               IF @DiasArchivo = 'Del dia anterior' AND @CtaDinD IS NOT NULL
+                BEGIN
+                 SET @SQL = ' DELETE FROM vicLayoutSalidaINSERTDet '+char(13)
+                           +' INSERT INTO vicLayoutSalidaINSERTDet (ID, Reg) ' +char(13)
+                           +' SELECT ID, + '+@ConsultaPosB+' FROM '+@TablaDetalle +char(13)
+                           +' WHERE FechaEmision = '+''''+cast(cast(dateadd(day,-1,getdate()) as date) as varchar)+'''' +char(13)
+                           +' AND isnull(Empresa,'''') = '+ 'isnull('+''''+@Empresa+''''+', isnull(Empresa, ''''))'
+                           +' AND '+ @CuentaDinCampo + ' = '+''''+ @CtaDinD + ''''+char(13)
+                           +' ORDER BY ID ASC'
+
+                 EXEC (@SQL)
+
+                END
+               
+               IF @DiasArchivo = 'Del dia anterior' AND (@CtaDinD IS NULL OR @CtaDinD IN ('',' ')) 
+                BEGIN
+                 SET @SQL = ' DELETE FROM vicLayoutSalidaINSERTDet '+char(13)
+                           +' INSERT INTO vicLayoutSalidaINSERTDet (ID, Reg) ' +char(13)
+                           +' SELECT ID, + '+@ConsultaPosB+' FROM '+@TablaDetalle +char(13)
+                           +' WHERE FechaEmision = '+''''+cast(cast(dateadd(day,-1,getdate()) as date) as varchar)+'''' +char(13)
+                           +' AND isnull(Empresa,'''') = '+ 'isnull('+''''+@Empresa+''''+', isnull(Empresa, ''''))'
+                           +' ORDER BY ID ASC'
+
+                 EXEC (@SQL)
+
+                END
+
+                IF @DiasArchivo = 'De la semana' AND @CtaDinD IS NOT NULL
+                 BEGIN
+                  
+                  IF DATEPART(WEEKDAY, @Hoy) = 1 SELECT @FechaD = getdate()
+                  IF DATEPART(WEEKDAY, @Hoy) = 2 SELECT @FechaD = DATEADD(DAY,-1,getdate())
+                  IF DATEPART(WEEKDAY, @Hoy) = 3 SELECT @FechaD = DATEADD(DAY,-2,getdate()) 
+                  IF DATEPART(WEEKDAY, @Hoy) = 4 SELECT @FechaD = DATEADD(DAY,-3,getdate())
+                  IF DATEPART(WEEKDAY, @Hoy) = 5 SELECT @FechaD = DATEADD(DAY,-4,getdate())
+                  IF DATEPART(WEEKDAY, @Hoy) = 6 SELECT @FechaD = DATEADD(DAY,-5,getdate())
+                  IF DATEPART(WEEKDAY, @Hoy) = 7 SELECT @FechaD = DATEADD(DAY,-6,getdate())
+
+                  --//SELECT @FechaD as Desde
+                  
+                  SET @SQL = ' DELETE FROM vicLayoutSalidaINSERTDet '+char(13)
+                            +' INSERT INTO vicLayoutSalidaINSERTDet (ID, Reg) ' +char(13)
+                            +' SELECT ID, + '+@ConsultaPosB+' FROM '+@TablaDetalle +char(13)
+                            +' WHERE FechaEmision BETWEEN '+''''+cast(cast(@FechaD as date) as varchar)+''''+' AND '+
+                            ''''+cast(cast(GETDATE() as date) as varchar)+'''' +char(13)
+                            +' AND isnull(Empresa,'''') = '+ 'isnull('+''''+@Empresa+''''+', isnull(Empresa, ''''))'
+                            +' AND '+ @CuentaDinCampo + ' = '+''''+ @CtaDinD + ''''+char(13)
+                            +' ORDER BY ID ASC'
+
+                  EXEC (@SQL)
+
+                 END
+
+               IF @DiasArchivo = 'De la semana' AND (@CtaDinD IS NULL OR @CtaDinD IN ('',' ')) 
+                 BEGIN
+                  
+                  IF DATEPART(WEEKDAY, @Hoy) = 1 SELECT @FechaD = getdate()
+                  IF DATEPART(WEEKDAY, @Hoy) = 2 SELECT @FechaD = DATEADD(DAY,-1,getdate())
+                  IF DATEPART(WEEKDAY, @Hoy) = 3 SELECT @FechaD = DATEADD(DAY,-2,getdate()) 
+                  IF DATEPART(WEEKDAY, @Hoy) = 4 SELECT @FechaD = DATEADD(DAY,-3,getdate())
+                  IF DATEPART(WEEKDAY, @Hoy) = 5 SELECT @FechaD = DATEADD(DAY,-4,getdate())
+                  IF DATEPART(WEEKDAY, @Hoy) = 6 SELECT @FechaD = DATEADD(DAY,-5,getdate())
+                  IF DATEPART(WEEKDAY, @Hoy) = 7 SELECT @FechaD = DATEADD(DAY,-6,getdate())
+
+                  --//SELECT @FechaD as Desde
+                  
+                  SET @SQL = ' DELETE FROM vicLayoutSalidaINSERTDet '+char(13)
+                            +' INSERT INTO vicLayoutSalidaINSERTDet (ID, Reg) ' +char(13)
+                            +' SELECT ID, + '+@ConsultaPosB+' FROM '+@TablaDetalle +char(13)
+                            +' WHERE FechaEmision BETWEEN '+''''+cast(cast(@FechaD as date) as varchar)+''''+' AND '+
+                            ''''+cast(cast(GETDATE() as date) as varchar)+'''' +char(13)
+                            +' AND isnull(Empresa,'''') = '+ 'isnull('+''''+@Empresa+''''+', isnull(Empresa, ''''))'
+                            +' ORDER BY ID ASC'
+
+                  EXEC (@SQL)
+
+                 END
+
+               FETCH NEXT FROM CurDetalleTxt INTO @CampoA, @ValorDefectoA, @TipoDatoA, @FormatoColumnaA, @LongitudA
+
+             END
+
+           CLOSE CurDetalleTxt
+          DEALLOCATE CurDetalleTxt --// Termina cursor que Genera cadena detalle de archivo txt
+
+        END --// BEGIN de IF @TipoArchivo = 'txt'
+
+--=====================
+-- TERMINA DETALLE TXT
+--=====================
+
+--============================
+-- DETALLE CSV: TODOS FORMATOS
+--============================
+
+--//*DETALLE TXT
+       IF @TipoArchivo = 'csv'
+        BEGIN
+        --//Genera cadena ENCABEZADO de archivo txt
+         DECLARE CurDetalleCsv CURSOR LOCAL FOR
+           SELECT Campo, ValorDefecto, TipoDato, FormatoColumna, Longitud
+           FROM vicCfgLayoutSalidaDGral
+           WHERE Nombre = @Layout
+           AND Ubicacion = 'Detalle'
+           
+           SET @DetalleArchivo = ''
+
+           OPEN CurDetalleCsv
+           FETCH NEXT FROM CurDetalleCsv INTO @CampoA, @ValorDefectoA, @TipoDatoA, @FormatoColumnaA, @LongitudA
+            WHILE @@FETCH_STATUS = 0
+              BEGIN
+
+               IF @SeparadorFormato = 'pipe' SET @Separador = '|'
+               IF @SeparadorFormato = 'diagonal' SET @Separador = '/'               
+
+               SELECT @TablaDetalle = @TablaBD
+               --IF @TablaBD = 'Gastos' SET @TablaDetalle = 'GastoDetalle'
+
+--=================
+-- ANCHO FIJO CSV
+--=================
+
+--// FORMATO ANCHO FIJO CON CEROS:
+
+          IF @FormatoLayout = 'Ancho Fijo' AND @CeroIzq = 1 AND (@PuntoDecimal IS NULL OR @PuntoDecimal = 0)
+           BEGIN
+ 
+              IF @EspacioCantidad IS NULL SET @EspacioCantidad = 5
+              
+              IF @TipoDatoA = 'Varchar'
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')
+               +' cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) +'
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+              
+              IF @TipoDatoA IN ('Float','Money')
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')               
+               + 'CASE'+char(13)
+               + 'WHEN dbo.fnEsNumerico(' +@CampoA+ ') = 1 THEN ' + char(13)               
+               + 'cast(REPLICATE(''0'', '+cast(@LongitudA as varchar)+' - LEN('+@CampoA+')) as varchar(max)) + ' 
+               + 'cast(isnull('+@CampoA+', '+''''+@ValorDefectoA+''''+') as varchar ) ' +char(13)
+               
+               + 'WHEN dbo.fnEsNumerico('+'''' +@ValorDefectoA+ ''''+ ') = 1 THEN ' +char(13) --//
+               +' REPLICATE (''0'', '+cast(@LongitudA as varchar)+' - LEN(' +''''+@ValorDefectoA+''''+ ')) +' + ''''+@ValorDefectoA+''''+ ' END + '
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+
+              IF @TipoDatoA IN ('Int','Bit')
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')
+               +' cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) +'
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+
+              --//
+              IF @FormatoColumnaA = 'Fecha AMD'
+               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''yyyyMMdd'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               --//+''''+@ValorDefectoA+''''
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''yyyyMMdd'''+') '+char(13)
+               +' END + '
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+
+               --//
+               IF @FormatoColumnaA = 'Fecha DMA'
+               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''ddMMyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               --//+''''+@ValorDefectoA+''''
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''ddMMyyyy'''+') '+char(13)
+               +' END + '
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+
+               --//
+               IF @FormatoColumnaA = 'Fecha MDA'
+               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''MMddyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''MMddyyyy'''+') '+char(13)
+               +' END + '
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+               
+               SELECT @ConsultaPosB = SUBSTRING (@ConsultaPreB, 1, Len(@ConsultaPreB) - 1 )
+               --//SELECT @ConsultaPosB as ConsultaCompletaDetalleA
+
+            END
+
+--//FORMATO ANCHO FIJO CON DECIMALES:
+
+          IF @FormatoLayout = 'Ancho Fijo' AND @PuntoDecimal = 1 AND (@CeroIzq IS NULL OR @CeroIzq = 0)
+           BEGIN
+               
+              IF @EspacioCantidad IS NULL SET @EspacioCantidad = 5
+              
+              IF @TipoDatoA = 'Varchar'
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')
+               +' cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) +'
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+              
+              IF @TipoDatoA IN ('Float','Money')
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')               
+               + 'CASE'+char(13)
+               + 'WHEN dbo.fnEsNumerico(' +@CampoA+ ') = 1 THEN ' + char(13)               
+               + 'cast(isnull('+'CONVERT(DECIMAL(18,2), '+@CampoA+') , '+''''+@ValorDefectoA+''''+') as varchar ) ' +char(13)               
+               + 'WHEN dbo.fnEsNumerico('+'''' +@ValorDefectoA+ ''''+ ') = 1 THEN ' +char(13)
+               + 'CONVERT ( varchar(max) , cast (' +''''+@ValorDefectoA+''''+ ' as decimal (12,2)) ) END + ' + char(13)
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+              
+              IF @TipoDatoA IN ('Int','Bit')
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')
+               +' cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) +'
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+                            
+               --//
+               IF @FormatoColumnaA = 'Fecha AMD'
+               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''yyyyMMdd'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''yyyyMMdd'''+') '+char(13)
+               +' END + '
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+
+               --//
+               IF @FormatoColumnaA = 'Fecha DMA'
+               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''ddMMyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''ddMMyyyy'''+') '+char(13)
+               +' END + '
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+
+
+               --//
+               IF @FormatoColumnaA = 'Fecha MDA'
+               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''MMddyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''MMddyyyy'''+') '+char(13)
+               +' END + '
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+               
+               SELECT @ConsultaPosB = SUBSTRING (@ConsultaPreB, 1, Len(@ConsultaPreB) - 1 )
+               --//SELECT @ConsultaPosB as ConsultaCompletaDetalle
+
+            END
+
+--// FORMATO ANCHO FIJO CON CEROS Y CON DECIMALES
+
+          IF @FormatoLayout = 'Ancho Fijo' AND @CeroIzq = 1 AND @PuntoDecimal = 1
+           BEGIN
+               
+              IF @EspacioCantidad IS NULL SET @EspacioCantidad = 5
+              
+              IF @TipoDatoA = 'Varchar'
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')
+               +' cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) +'
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+              
+              IF @TipoDatoA IN ('Float','Money')
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')               
+               + 'CASE'+char(13)
+               + 'WHEN dbo.fnEsNumerico(' +@CampoA+ ') = 1 THEN ' + char(13)
+               + 'cast(REPLICATE(''0'', '+cast(@LongitudA as varchar)+' - LEN('+@CampoA+')) as varchar(max)) + cast(convert(decimal(18,2), '+@CampoA+') as varchar)'
+               + char(13)
+               + 'WHEN dbo.fnEsNumerico('+'''' +@ValorDefectoA+ ''''+ ') = 1 THEN ' +char(13)
+               + 'REPLICATE (''0'', '+cast(@LongitudA as varchar)+' - LEN(' +''''+@ValorDefectoA+''''+ ')) + CONVERT ( varchar(max) , cast (' +''''+@ValorDefectoA+''''+ ' as decimal (12,2)) ) END + '
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+              
+              IF @TipoDatoA IN ('Int','Bit')
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')
+               +' cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) +'
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+
+               --//
+               IF @FormatoColumnaA = 'Fecha AMD'
+               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' + char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''yyyyMMdd'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+ char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''yyyyMMdd'''+') '+char(13)
+               +' END + '
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+
+               --//
+               IF @FormatoColumnaA = 'Fecha DMA'
+               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''ddMMyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''ddMMyyyy'''+') '+char(13)
+               +' END + '
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+
+               --//
+               IF @FormatoColumnaA = 'Fecha MDA'
+               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''MMddyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''MMddyyyy'''+') '+char(13)
+               +' END + '
+               + 'REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+')'+' + '','' + '
+
+               SELECT @ConsultaPosB = SUBSTRING (@ConsultaPreB, 1, Len(@ConsultaPreB) - 1 )
+               --//SELECT @ConsultaPosB as ConsultaCompletaDetalleas
+
+            END
+ 
+ --//FORMATO ANCHO FIJO SIN CEROS SIN DECIMALES
+
+            IF @FormatoLayout = 'Ancho Fijo' AND (@CeroIzq IS NULL OR @CeroIzq = 0) AND (@PuntoDecimal IS NULL OR @PuntoDecimal = 0)
+             BEGIN
+               
+               IF @EspacioCantidad IS NULL SET @EspacioCantidad = 5
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')
+               
+               IF @FormatoColumnaA IN ('Fecha DMA', 'Fecha AMD', 'Fecha MDA')
+               BEGIN
+               DECLARE @FormatoF6 varchar(10)
+
+               IF @FormatoColumnaA = 'Fecha DMA' SET @FormatoF6 = 'ddMMyyyy'
+               IF @FormatoColumnaA = 'Fecha AMD' SET @FormatoF6 = 'yyyyMMdd'
+               IF @FormatoColumnaA = 'Fecha MDA' SET @FormatoF6 = 'MMddyyyy'
+
+               SELECT @ConsultaPreB = @ConsultaPreB
+               + ' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+''''+@FormatoF6+''''+') + ' + char(13)
+               + ' REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+') + '+' + '','' + '
+
+               END
+
+               ELSE 
+               SELECT @ConsultaPreB = @ConsultaPreB
+               + ' cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) + ' +char(13)
+               + ' REPLICATE ('' '','+CONVERT(varchar(max), @EspacioCantidad)+') + '+' + '','' + '
+
+               SELECT @ConsultaPosB = SUBSTRING (@ConsultaPreB, 1, Len(@ConsultaPreB) - 1 )
+               --//SELECT @ConsultaPosB as ConsultaCompletaDetalle
+
+             END
+
+--========================
+-- TERMINA ANCHO FIJO CSV.
+--========================  
+
+--====================
+-- SEPARADOR DET CSV:
+--====================
+
+--// FORMATO SEPARADOR CON CEROS:
+
+          IF @FormatoLayout = 'Separador' AND @CeroIzq = 1 AND (@PuntoDecimal IS NULL OR @PuntoDecimal = 0)
+           BEGIN
+             
+              IF @TipoDatoA = 'Varchar'
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')
+               +'cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) '
+               + ' + '','' + '
+
+              IF @TipoDatoA IN ('Float','Money')
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')               
+               + 'CASE'+char(13)
+               + 'WHEN dbo.fnEsNumerico(' +@CampoA+ ') = 1 THEN ' + char(13)               
+               + 'cast(REPLICATE(''0'', '+cast(@LongitudA as varchar)+' - LEN('+@CampoA+')) as varchar(max)) + ' 
+               + 'cast(isnull('+@CampoA+', '+''''+@ValorDefectoA+''''+') as varchar ) ' +char(13)               
+               + 'WHEN dbo.fnEsNumerico('+'''' +@ValorDefectoA+ ''''+ ') = 1 THEN ' +char(13) --//
+               +' REPLICATE (''0'', '+cast(@LongitudA as varchar)+' - LEN(' +''''+@ValorDefectoA+''''+ ')) +' + ''''+@ValorDefectoA+''''+ ' END + '
+               + ' + '','' + '
+
+              IF @TipoDatoA IN ('Int','Bit')
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')
+               +'cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) '
+               + ' + '','' + '
+               
+              --//
+              IF @FormatoColumnaA = 'Fecha AMD'
+               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''yyyyMMdd'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''yyyyMMdd'''+') '+char(13)
+               +' END + '
+               + ' + '','' + '
+               
+              --//
+              IF @FormatoColumnaA = 'Fecha DMA'
+               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''ddMMyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''ddMMyyyy'''+') '+char(13)
+               +' END + '
+               + ' + '','' + '
+
+              --//
+              IF @FormatoColumnaA = 'Fecha MDA'
+               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''MMddyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''MMddyyyy'''+') '+char(13)
+               +' END + '
+               + ' + '','' + '
+               
+               SELECT @ConsultaPosB = SUBSTRING (@ConsultaPreB, 1, Len(@ConsultaPreB) - 1 )
+               --//SELECT @ConsultaPosB as ConsultaCompletaDetalle
+
+            END
+
+--//FORMATO SEPARADOR CON DECIMALES:
+
+          IF @FormatoLayout = 'Separador' AND @PuntoDecimal = 1 AND (@CeroIzq IS NULL OR @CeroIzq = 0)
+           BEGIN
+              
+              IF @TipoDatoA = 'Varchar'
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')
+               +'cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) '
+               + ' + '','' + '
+
+              IF @TipoDatoA IN ('Float','Money')
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')               
+               + 'CASE'+char(13)
+               + 'WHEN dbo.fnEsNumerico(' +@CampoA+ ') = 1 THEN ' + char(13)               
+               --+ 'cast(REPLICATE(''0'', '+cast(@LongitudA as varchar)+' - LEN('+@CampoA+')) as varchar(max)) + ' 
+               + 'cast(isnull('+'CONVERT(DECIMAL(18,2), '+@CampoA+') , '+''''+@ValorDefectoA+''''+') as varchar ) ' +char(13)               
+               + 'WHEN dbo.fnEsNumerico('+'''' +@ValorDefectoA+ ''''+ ') = 1 THEN ' +char(13)
+               + 'CONVERT ( varchar(max) , cast (' +''''+@ValorDefectoA+''''+ ' as decimal (12,2)) ) END + ' + char(13)
+               + ' + '','' + '
+              
+              IF @TipoDatoA IN ('Int','Bit')
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')
+               +'cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) '
+               + ' + '','' + '
+                          
+               --//
+               IF @FormatoColumnaA = 'Fecha AMD'
+               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''yyyyMMdd'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''yyyyMMdd'''+') '+char(13)
+               +' END + '
+               + ' + '','' + '
+
+               --//
+               IF @FormatoColumnaA = 'Fecha DMA'
+               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''ddMMyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''ddMMyyyy'''+') '+char(13)
+               +' END + '
+               + ' + '','' + '
+
+               --//
+               IF @FormatoColumnaA = 'Fecha MDA'
+               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''MMddyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''MMddyyyy'''+') '+char(13)
+               +' END + '
+               + ' + '','' + '
+               
+               SELECT @ConsultaPosB = SUBSTRING (@ConsultaPreB, 1, Len(@ConsultaPreB) - 1 )
+               --//SELECT @ConsultaPosB as ConsultaCompletaDetalleG
+
+            END
+
+--// FORMATO SEPARADOR CON CEROS Y CON DECIMALES
+
+          IF @FormatoLayout = 'Separador' AND @CeroIzq = 1 AND @PuntoDecimal = 1
+           BEGIN
+              
+              IF @TipoDatoA = 'Varchar'
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')
+               +'cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) '
+               + ' + '','' + '
+
+              IF @TipoDatoA IN ('Float','Money')
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')               
+               + 'CASE'+char(13)
+               + 'WHEN dbo.fnEsNumerico(' +@CampoA+ ') = 1 THEN ' + char(13)
+               + 'cast(REPLICATE(''0'', '+cast(@LongitudA as varchar)+' - LEN('+@CampoA+')) as varchar(max)) + cast(convert(decimal(18,2), '+@CampoA+') as varchar)'
+               + char(13)
+               + 'WHEN dbo.fnEsNumerico('+'''' +@ValorDefectoA+ ''''+ ') = 1 THEN ' +char(13)
+               + 'REPLICATE (''0'', '+cast(@LongitudA as varchar)+' - LEN(' +''''+@ValorDefectoA+''''+ ')) + CONVERT ( varchar(max) , cast (' +''''+@ValorDefectoA+''''+ ' as decimal (12,2)) ) END + '
+               + ' + '','' + '
+
+              IF @TipoDatoA IN ('Int','Bit')
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')
+               +'cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) '
+               + ' + '','' + '             
+               
+              --//
+              IF @FormatoColumnaA = 'Fecha AMD'
+               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''yyyyMMdd'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''yyyyMMdd'''+') '+char(13)
+               +' END + '
+               + ' + '','' + '
+
+              --//
+              IF @FormatoColumnaA = 'Fecha DMA'
+               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''ddMMyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''ddMMyyyy'''+') '+char(13)
+               +' END + '
+               + ' + '','' + '
+
+               --//
+               IF @FormatoColumnaA = 'Fecha MDA'
+               
+               SELECT @ConsultaPreB = @ConsultaPreB +
+               +'CASE WHEN '+@CampoA+' LIKE ''%:00%'' THEN ' +char(13)
+               +'FORMAT(cast('+@CampoA+ ' as date), ''MMddyyyy'')' + char(13)
+               +'WHEN '+@CampoA+' IS NULL THEN '+char(13)
+               +' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+'''MMddyyyy'''+') '+char(13)
+               +' END + '
+               + ' + '','' + '
+
+               SELECT @ConsultaPosB = SUBSTRING (@ConsultaPreB, 1, Len(@ConsultaPreB) - 1 )
+               --//SELECT @ConsultaPosB as ConsultaCompletaDetalleC
+
+            END
+ 
+ --//FORMATO SEPARADOR SIN CEROS SIN DECIMALES
+
+            IF @FormatoLayout = 'Separador' AND (@CeroIzq IS NULL OR @CeroIzq = 0) AND (@PuntoDecimal IS NULL OR @PuntoDecimal = 0)
+             BEGIN
+               
+               SELECT @ConsultaPreB = isnull(@ConsultaPreB,'')
+               
+               IF @FormatoColumnaA IN ('Fecha DMA', 'Fecha AMD', 'Fecha MDA')
+               BEGIN
+               DECLARE @FormatoF7 varchar(10)
+
+               IF @FormatoColumnaA = 'Fecha DMA' SET @FormatoF7 = 'ddMMyyyy'
+               IF @FormatoColumnaA = 'Fecha AMD' SET @FormatoF7 = 'yyyyMMdd'
+               IF @FormatoColumnaA = 'Fecha MDA' SET @FormatoF7 = 'MMddyyyy'
+
+               SELECT @ConsultaPreB = @ConsultaPreB
+               + ' FORMAT (isnull('+@CampoA+ ', '+''''+@ValorDefectoA+''''+'), '+''''+@FormatoF7+''''+') + ' + char(13)
+               + ' + '','' + '
+
+               END
+
+               ELSE 
+               SELECT @ConsultaPreB = @ConsultaPreB
+               + ' cast(isnull('+@CampoA+' , '+cast(+''''+@ValorDefectoA+'''' as varchar)+') as varchar) + ' +char(13)
+               + ' + '','' + ' --//+ char(13)
+
+               SELECT @ConsultaPosB = SUBSTRING (@ConsultaPreB, 1, Len(@ConsultaPreB) - 1 )
+               --//SELECT @ConsultaPosB as ConsultaCompletaDetalle
+
+             END
+
+--===================================
+-- TERMINA FORMATO DET SEPARADOR CSV
+--===================================
+  
+    --//Consulta    
+    --//Llena tabla layout
+
+               IF @DiasArchivo = 'Todo' AND @CtaDinD IS NOT NULL
+                BEGIN
+
+                 SET @SQL = ' DELETE FROM vicLayoutSalidaINSERTDet '+char(13)
+                           +' INSERT INTO vicLayoutSalidaINSERTDet (ID, Reg) '+char(13)
+                           +' SELECT ID, + '+@ConsultaPosB+' FROM '+@TablaDetalle +char(13)
+                           +' WHERE isnull(Empresa,'''') = '+ 'isnull('+''''+@Empresa+''''+', isnull(Empresa, ''''))'
+                           +' AND '+ @CuentaDinCampo + ' = '+''''+ @CtaDinD + ''''+char(13)
+                           +' ORDER BY ID ASC'
+                 EXEC (@SQL)
+
+                END
+
+               IF @DiasArchivo = 'Todo' AND (@CtaDinD IS NULL OR @CtaDinD IN ('',' ')) 
+                BEGIN
+
+                 SET @SQL = ' DELETE FROM vicLayoutSalidaINSERTDet '+char(13)
+                           +' INSERT INTO vicLayoutSalidaINSERTDet (ID, Reg) '+char(13)
+                           +' SELECT ID, + '+@ConsultaPosB+' FROM '+@TablaDetalle +char(13)
+                           +' WHERE isnull(Empresa,'''') = '+ 'isnull('+''''+@Empresa+''''+', isnull(Empresa, ''''))'
+                           +' ORDER BY ID ASC'
+                        
+                 EXEC (@SQL)
+
+                END
+                
+               IF @DiasArchivo = 'Del dia' AND @CtaDinD IS NOT NULL
+                BEGIN
+                 SET @SQL = ' DELETE FROM vicLayoutSalidaINSERTDet '+char(13)
+                           +' INSERT INTO vicLayoutSalidaINSERTDet (ID, Reg) '+char(13)
+                           +' SELECT ID, + '+@ConsultaPosB+' FROM '+@TablaDetalle +char(13)
+                           +' WHERE FechaEmision = '+''''+cast(cast(getdate() as date) as varchar)+'''' +char(13)
+                           +' AND isnull(Empresa,'''') = '+ 'isnull('+''''+@Empresa+''''+', isnull(Empresa, ''''))'
+                           +' AND '+ @CuentaDinCampo + ' = '+''''+ @CtaDinD + ''''+char(13)
+                           +' ORDER BY ID ASC'
+
+                 EXEC (@SQL)
+
+                END
+
+               IF @DiasArchivo = 'Del dia' AND (@CtaDinD IS NULL OR @CtaDinD IN ('',' ')) 
+                BEGIN
+                 SET @SQL = ' DELETE FROM vicLayoutSalidaINSERTDet '+char(13)
+                           +' INSERT INTO vicLayoutSalidaINSERTDet (ID, Reg) '+char(13)
+                           +' SELECT ID, + '+@ConsultaPosB+' FROM '+@TablaDetalle +char(13)
+                           +' WHERE FechaEmision = '+''''+cast(cast(getdate() as date) as varchar)+'''' +char(13)
+                           +' AND isnull(Empresa,'''') = '+ 'isnull('+''''+@Empresa+''''+', isnull(Empresa, ''''))'
+                           +' ORDER BY ID ASC'
+
+                 EXEC (@SQL)
+
+                END
+
+               IF @DiasArchivo = 'Del dia anterior' AND @CtaDinD IS NOT NULL
+                BEGIN
+                 SET @SQL = ' DELETE FROM vicLayoutSalidaINSERTDet '+char(13)
+                           +' INSERT INTO vicLayoutSalidaINSERTDet (ID, Reg) ' +char(13)
+                           +' SELECT ID, + '+@ConsultaPosB+' FROM '+@TablaDetalle +char(13)
+                           +' WHERE FechaEmision = '+''''+cast(cast(dateadd(day,-1,getdate()) as date) as varchar)+'''' +char(13)
+                           +' AND isnull(Empresa,'''') = '+ 'isnull('+''''+@Empresa+''''+', isnull(Empresa, ''''))'
+                           +' AND '+ @CuentaDinCampo + ' = '+''''+ @CtaDinD + ''''+char(13)
+                           +' ORDER BY ID ASC'
+
+                 EXEC (@SQL)
+
+                END
+
+               IF @DiasArchivo = 'Del dia anterior' AND (@CtaDinD IS NULL OR @CtaDinD IN ('',' ')) 
+                BEGIN
+                 SET @SQL = ' DELETE FROM vicLayoutSalidaINSERTDet '+char(13)
+                           +' INSERT INTO vicLayoutSalidaINSERTDet (ID, Reg) ' +char(13)
+                           +' SELECT ID, + '+@ConsultaPosB+' FROM '+@TablaDetalle +char(13)
+                           +' WHERE FechaEmision = '+''''+cast(cast(dateadd(day,-1,getdate()) as date) as varchar)+'''' +char(13)
+                           +' AND isnull(Empresa,'''') = '+ 'isnull('+''''+@Empresa+''''+', isnull(Empresa, ''''))'
+                           +' ORDER BY ID ASC'
+
+                 EXEC (@SQL)
+
+                END
+
+                IF @DiasArchivo = 'De la semana' AND @CtaDinD IS NOT NULL
+                 BEGIN
+                  
+                  IF DATEPART(WEEKDAY, @Hoy) = 1 SELECT @FechaD = getdate()
+                  IF DATEPART(WEEKDAY, @Hoy) = 2 SELECT @FechaD = DATEADD(DAY,-1,getdate())
+                  IF DATEPART(WEEKDAY, @Hoy) = 3 SELECT @FechaD = DATEADD(DAY,-2,getdate()) 
+                  IF DATEPART(WEEKDAY, @Hoy) = 4 SELECT @FechaD = DATEADD(DAY,-3,getdate())
+                  IF DATEPART(WEEKDAY, @Hoy) = 5 SELECT @FechaD = DATEADD(DAY,-4,getdate())
+                  IF DATEPART(WEEKDAY, @Hoy) = 6 SELECT @FechaD = DATEADD(DAY,-5,getdate())
+                  IF DATEPART(WEEKDAY, @Hoy) = 7 SELECT @FechaD = DATEADD(DAY,-6,getdate())
+
+                  --//SELECT @FechaD as Desde
+                  
+                  SET @SQL = ' DELETE FROM vicLayoutSalidaINSERTDet '+char(13)
+                            +' INSERT INTO vicLayoutSalidaINSERTDet (ID, Reg) ' +char(13)
+                            +' SELECT ID, + '+@ConsultaPosB+' FROM '+@TablaDetalle +char(13)
+                            +' WHERE FechaEmision BETWEEN '+''''+cast(cast(@FechaD as date) as varchar)+''''+' AND '+
+                            ''''+cast(cast(GETDATE() as date) as varchar)+'''' +char(13)
+                            +' AND isnull(Empresa,'''') = '+ 'isnull('+''''+@Empresa+''''+', isnull(Empresa, ''''))'
+                            +' AND '+ @CuentaDinCampo + ' = '+''''+ @CtaDinD + ''''+char(13)
+                            +' ORDER BY ID ASC'
+
+                  EXEC (@SQL)
+
+                  END
+
+                IF @DiasArchivo = 'De la semana' AND (@CtaDinD IS NULL OR @CtaDinD IN ('',' ')) 
+                 BEGIN
+                  
+                  IF DATEPART(WEEKDAY, @Hoy) = 1 SELECT @FechaD = getdate()
+                  IF DATEPART(WEEKDAY, @Hoy) = 2 SELECT @FechaD = DATEADD(DAY,-1,getdate())
+                  IF DATEPART(WEEKDAY, @Hoy) = 3 SELECT @FechaD = DATEADD(DAY,-2,getdate()) 
+                  IF DATEPART(WEEKDAY, @Hoy) = 4 SELECT @FechaD = DATEADD(DAY,-3,getdate())
+                  IF DATEPART(WEEKDAY, @Hoy) = 5 SELECT @FechaD = DATEADD(DAY,-4,getdate())
+                  IF DATEPART(WEEKDAY, @Hoy) = 6 SELECT @FechaD = DATEADD(DAY,-5,getdate())
+                  IF DATEPART(WEEKDAY, @Hoy) = 7 SELECT @FechaD = DATEADD(DAY,-6,getdate())
+
+                  --//SELECT @FechaD as Desde
+                  
+                  SET @SQL = ' DELETE FROM vicLayoutSalidaINSERTDet '+char(13)
+                            +' INSERT INTO vicLayoutSalidaINSERTDet (ID, Reg) ' +char(13)
+                            +' SELECT ID, + '+@ConsultaPosB+' FROM '+@TablaDetalle +char(13)
+                            +' WHERE FechaEmision BETWEEN '+''''+cast(cast(@FechaD as date) as varchar)+''''+' AND '+
+                            ''''+cast(cast(GETDATE() as date) as varchar)+'''' +char(13)
+                            +' AND isnull(Empresa,'''') = '+ 'isnull('+''''+@Empresa+''''+', isnull(Empresa, ''''))'
+                            +' ORDER BY ID ASC'
+
+                  EXEC (@SQL)
+
+                  END
+
+               FETCH NEXT FROM CurDetalleCsv INTO @CampoA, @ValorDefectoA, @TipoDatoA, @FormatoColumnaA, @LongitudA
+
+             END
+            --//SELECT @EncabezadoArchivo as Encabezadotxt
+           CLOSE CurDetalleCsv
+          DEALLOCATE CurDetalleCsv --// Termina cursor que Genera cadena encabezado de archivo txt
+
+        END --// BEGIN de IF @TipoArchivo = 'csv'
+
+--=============================
+-- TERMINA DETALLE ARCHIVO CSV
+--=============================
+
+--=============================================================================
+-- ************************** TERMINA DETALLE ** ******************************
+--=============================================================================
+
+--// SE GENERA CADENA ENCABEZADO ARCHIVO:
+
+ IF @FormatoLayout = 'Ancho Fijo'
+   begin
+     DECLARE CurEncabezado CURSOR LOCAL FOR
+      SELECT Reg from vicLayoutSalidaINSERTEnc
+       OPEN CurEncabezado
+        FETCH NEXT FROM CurEncabezado INTO @Reg
+         WHILE @@FETCH_STATUS = 0
+          begin
+           --//SET @EncabezadoArchivo = isnull(@EncabezadoArchivo,'') + SUBSTRING(@Reg, 1, LEN(@Reg) -1) +CHAR(13)+CHAR(10)
+           IF (@Reg IS NULL OR @Reg IN ('', ' '))
+            SET @EncabezadoArchivo = ''--isnull(@EncabezadoArchivo,'') + isnull(@Reg,'')
+           IF (@Reg IS NOT NULL OR @Reg NOT IN ('', ' '))
+            SET @EncabezadoArchivo = isnull(@EncabezadoArchivo,'') + isnull(@Reg,'') +CHAR(13)+CHAR(10)
+          -- SELECT @EncabezadoArchivo as ENCABEZADOArchivo
+          FETCH NEXT FROM CurEncabezado INTO @Reg
+          end
+        CLOSE CurEncabezado
+       DEALLOCATE CurEncabezado
+    end
+
+  IF @FormatoLayout = 'Separador'
+   begin
+     DECLARE CurEncabezado CURSOR LOCAL FOR
+      SELECT Reg from vicLayoutSalidaINSERTEnc
+       OPEN CurEncabezado
+        FETCH NEXT FROM CurEncabezado INTO @Reg
+         WHILE @@FETCH_STATUS = 0
+          begin
+           IF (@Reg IS NULL OR @Reg IN ('', ' '))
+            SET @EncabezadoArchivo = ''--isnull(@EncabezadoArchivo,'') + isnull(@Reg,'')
+           IF (@Reg IS NOT NULL OR @Reg NOT IN ('', ' '))
+            SET @EncabezadoArchivo = isnull(@EncabezadoArchivo,'') + SUBSTRING(@Reg, 1, LEN(@Reg) -1) +CHAR(13)+CHAR(10)
+           --//SET @EncabezadoArchivo = isnull(@EncabezadoArchivo,'') + isnull(@Reg,'') +CHAR(13)+CHAR(10)
+          -- SELECT @EncabezadoArchivo as ENCABEZADOArchivo
+          FETCH NEXT FROM CurEncabezado INTO @Reg
+          end
+        CLOSE CurEncabezado
+       DEALLOCATE CurEncabezado
+    end
+
+--// SE GENERA CADENA DETALLE ARCHIVO:
+
+  IF @FormatoLayout = 'Ancho Fijo'
+    begin
+        DECLARE CurDetalle CURSOR LOCAL FOR
+         SELECT Reg from vicLayoutSalidaINSERTDet
+          OPEN CurDetalle
+           FETCH NEXT FROM CurDetalle INTO @Reg
+            WHILE @@FETCH_STATUS = 0
+             begin
+                           
+              --SET @DetalleArchivo = isnull(@DetalleArchivo,'') + SUBSTRING(@Reg, 1, LEN(@Reg) -1) +CHAR(13)+CHAR(10)
+              SET @DetalleArchivo = isnull(@DetalleArchivo,'') +isnull(@Reg,'') +CHAR(13)+CHAR(10)
+
+             FETCH NEXT FROM CurDetalle INTO @Reg
+             end
+           CLOSE CurDetalle
+          DEALLOCATE CurDetalle
+    end
+
+  IF @FormatoLayout = 'Separador'
+   begin
+        DECLARE CurDetalle CURSOR LOCAL FOR
+         SELECT Reg from vicLayoutSalidaINSERTDet
+          OPEN CurDetalle
+           FETCH NEXT FROM CurDetalle INTO @Reg
+            WHILE @@FETCH_STATUS = 0
+             begin
+                           
+              SET @DetalleArchivo = isnull(@DetalleArchivo,'') + SUBSTRING(@Reg, 1, LEN(@Reg) -1) +CHAR(13)+CHAR(10)
+              --SET @DetalleArchivo = isnull(@DetalleArchivo,'') +isnull(@Reg,'') +CHAR(13)+CHAR(10)
+
+             FETCH NEXT FROM CurDetalle INTO @Reg
+             end
+           CLOSE CurDetalle
+          DEALLOCATE CurDetalle
+    end
+
+--// GENERACIÓN DE CUERPO Y ARCHIVO:
+
+--=============================================================================
+-- GENERACIÓN Y LLENADO DE ARCHIVO TXT O CSV
+--=============================================================================
+         IF @EncabezadoArchivo IS NOT NULL--NOT IN ('', ' ') AND @EncabezadoArchivo IS NOT NULL 
+           AND @DetalleArchivo IS NOT NULL --//NOT IN ('', ' ') AND @DetalleArchivo  IS NOT NULL
+		   
+           BEGIN
+
+             SET @CuerpoArchivo = ''
+			 SELECT @FechaArchivo = format(getdate(), 'ddMMyyhhmmss')
+
+             IF (@EncabezadoArchivo IN ('', ' ') OR @EncabezadoArchivo IS NULL)
+              
+              SET @CuerpoArchivo = isnull(@CuerpoArchivo, '') +isnull(@DetalleArchivo,'')
+
+             ELSE
+              
+              SET @CuerpoArchivo = isnull(@CuerpoArchivo, '') + isnull(@EncabezadoArchivo, '')+isnull(@DetalleArchivo,'')
+
+                IF isnull(@RutaArchivo, '') <> '' --IF @RutaArchivo is not null
+                    begin
+
+                        IF CHARINDEX(@RutaArchivo,'.',1) < 1
+                        
+                        --IF @CtaDinD IS NOT NULL
+						IF isnull(@PrefijoNombre, '') <> ''
+							SELECT @RutaArchivo = @RutaArchivo+'\'+ltrim(rtrim(@PrefijoNombre))+ltrim(rtrim(@Empresa))+ltrim(rtrim(@FechaArchivo))+'.'+@TipoArchivo
+						ELSE
+							SELECT @RutaArchivo = @RutaArchivo+'\'+@Layout+'_'+@Empresa+'.'+@TipoArchivo
+
+                        --IF (@CtaDinD IS NULL OR @CtaDinD IN ('', ' '))
+                        -- SELECT @RutaArchivo = @RutaArchivo--+'\'+@Layout+'.'+@TipoArchivo
+
+                        IF @Ok IS NULL
+                            EXEC spEliminarArchivo @RutaArchivo, @Ok OUTPUT, @OkRef OUTPUT
+
+                        IF @Ok IS NULL
+                            EXEC spCrearArchivo @RutaArchivo, @ManejadorObjeto OUTPUT, @IDLayoutSalida OUTPUT, @Ok OUTPUT, @OkRef OUTPUT
+                             
+                        IF @Ok IS NULL  
+                            EXEC spInsertaEnArchivo2  @IDLayoutSalida, @CuerpoArchivo, @Ok OUTPUT, @OkRef OUTPUT
+                               
+                        IF @Ok IS NULL
+                            EXEC spCerrarArchivo @IDLayoutSalida, @ManejadorObjeto, @Ok OUTPUT, @OkRef OUTPUT
+               
+                    end
+                
+                END
+
+END --// IF @EstatusLayoutSalida = 'Activo' AND @TipoArchivo IN ('txt','csv')
+
+END TRY
+    
+ BEGIN CATCH
+  SELECT @Ok = 1, @OkRef = ERROR_MESSAGE()
+ END CATCH
+
+ IF @Conexion = 0
+  IF (@Ok IS NULL OR @Ok BETWEEN 80030 AND 81000)
+  COMMIT TRANSACTION
+    
+  ELSE
+  ROLLBACK TRANSACTION
+    
+  IF @EnSilencio = 0
+  SELECT Ok = @Ok, OkRef = @OkRef
+  
+END
+GO
